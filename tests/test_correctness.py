@@ -26,7 +26,6 @@ class TestParams:
         assert params.n == 1024
         assert params.w == 32  # default: sqrt(1024) = 32
         assert params.c == 32  # n/w = 1024/32 = 32
-        assert params.half_c == 16
 
     def test_non_power_of_two(self):
         """n doesn't have to be a power of two."""
@@ -35,7 +34,6 @@ class TestParams:
         # ceil(sqrt(1000)) = 32, which is even
         assert params.w == 32
         assert params.c == 32  # ceil(1000/32) = 32
-        assert params.n_padded == 32 * 32  # 1024
 
     def test_c_is_even(self):
         """c must be even (hints select c/2 blocks)."""

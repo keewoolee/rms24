@@ -7,6 +7,8 @@ The server's role is simple:
 3. Stream the database to clients during offline phase
 """
 
+from typing import Iterator
+
 from .params import Params
 from .protocol import Query, Response
 from .utils import Database, xor_bytes, zero_entry
@@ -35,39 +37,35 @@ class Server:
         """
         Answer an online query by computing parities of two subsets.
 
-        The client sends two subsets (real and dummy, permuted).
-        Server computes XOR of entries in each subset.
+        The client sends a compressed query (mask + shared offsets).
+        Server reconstructs subsets and computes XOR of entries.
 
         Args:
-            query: Query containing two subsets of (block, offset) pairs
+            query: Query containing mask and shared offsets
 
         Returns:
             Response containing XOR parities of each subset
         """
-        parity_0 = self._compute_parity(query.subset_0)
-        parity_1 = self._compute_parity(query.subset_1)
+        c = self.params.c
+        w = self.params.w
+        mask_int = int.from_bytes(query.mask, "little")
+
+        parity_0 = zero_entry(self.params.entry_size)
+        parity_1 = zero_entry(self.params.entry_size)
+        idx_0 = idx_1 = 0
+
+        for k in range(c):
+            if mask_int & 1:
+                parity_0 = xor_bytes(parity_0, self.db[k * w + query.offsets[idx_0]])
+                idx_0 += 1
+            else:
+                parity_1 = xor_bytes(parity_1, self.db[k * w + query.offsets[idx_1]])
+                idx_1 += 1
+            mask_int >>= 1
+
         return Response(parity_0=parity_0, parity_1=parity_1)
 
-    def _compute_parity(self, subset: list[tuple[int, int]]) -> bytes:
-        """
-        Compute XOR of database entries at given (block, offset) pairs.
-
-        Args:
-            subset: List of (block, offset) pairs
-
-        Returns:
-            XOR of all entries at the given positions
-        """
-        if not subset:
-            return zero_entry(self.params.entry_size)
-
-        result = zero_entry(self.params.entry_size)
-        for block, offset in subset:
-            idx = self.params.index_from_block_offset(block, offset)
-            result = xor_bytes(result, self.db[idx])
-        return result
-
-    def stream_database(self):
+    def stream_database(self) -> Iterator[tuple[int, list[bytes]]]:
         """
         Stream the database block by block.
 
@@ -76,4 +74,4 @@ class Server:
         Yields:
             Tuples of (block_id, entries_in_block)
         """
-        yield from self.db.stream_blocks(self.params.w)
+        yield from self.db.stream_blocks(self.params.w, self.params.c)

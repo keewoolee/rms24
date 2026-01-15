@@ -76,15 +76,18 @@ class Database:
         end = start + w
         return [self[i] for i in range(start, end)]
 
-    def stream_blocks(self, w: int) -> Iterator[tuple[int, list[bytes]]]:
+    def stream_blocks(self, w: int, c: int) -> Iterator[tuple[int, list[bytes]]]:
         """
         Stream database block by block.
+
+        Args:
+            w: Block size (entries per block)
+            c: Number of blocks to yield (from params.c)
 
         Yields:
             Tuples of (block_id, entries_in_block)
         """
-        num_blocks = (len(self.entries) + w - 1) // w
-        for k in range(num_blocks):
+        for k in range(c):
             yield k, self.get_block(k, w)
 
 

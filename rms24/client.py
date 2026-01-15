@@ -1,6 +1,6 @@
 import secrets
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Iterator, Optional
 
 from .params import Params
 from .protocol import Query, Response
@@ -16,7 +16,7 @@ class _QueryState:
     hint: RegHint
     hint_pos: int
     real_is_first: bool
-    entry: bytes = None  # Set by extract()
+    entry: Optional[bytes] = None  # Set by extract()
 
 
 class Client:
@@ -35,9 +35,9 @@ class Client:
             params: PIR parameters
         """
         self.params = params
-        self.prf = None
+        self.prf: Optional[PRF] = None
         self.hints = HintStorage()
-        self._query_state = None
+        self._query_state: Optional[_QueryState] = None
 
     def generate_hints(self, db_stream: Iterator[tuple[int, list[bytes]]]) -> None:
         """
@@ -168,28 +168,32 @@ class Client:
         j = hint.hint_id
         extra_block, extra_offset = hint.extra
 
-        # Construct real subset and dummy subset as (block, offset) pairs
-        real_subset = []
-        dummy_subset = []
+        # Build mask and offsets in a single pass (Vitalik Buterin's trick)
+        # Offsets are shared by position between real and dummy subsets
+        real_is_first = secrets.randbelow(2) == 0
+        mask_int = 0
+        offsets = []
 
         for k in range(c):
             if k == queried_block:
-                # Queried block: add dummy instead of real index
-                dummy_subset.append((k, secrets.randbelow(w)))
+                is_real = False
             elif block_selected(self.prf.select(j, k), hint.cutoff, hint.flip):
-                real_subset.append((k, self.prf.offset(j, k) % w))
+                is_real = True
             elif k == extra_block:
-                real_subset.append((k, extra_offset))
+                is_real = True
             else:
-                dummy_subset.append((k, secrets.randbelow(w)))
+                is_real = False
 
-        # Randomly permute the two subsets
-        if secrets.randbelow(2) == 0:
-            subset_0, subset_1 = real_subset, dummy_subset
-            real_is_first = True
-        else:
-            subset_0, subset_1 = dummy_subset, real_subset
-            real_is_first = False
+            if is_real:
+                if k == extra_block:
+                    offsets.append(extra_offset)
+                else:
+                    offsets.append(self.prf.offset(j, k) % w)
+
+            if is_real == real_is_first:
+                mask_int |= 1 << k
+
+        mask = mask_int.to_bytes((c + 7) // 8, "little")
 
         self._query_state = _QueryState(
             real_is_first=real_is_first,
@@ -198,7 +202,7 @@ class Client:
             queried=(queried_block, queried_offset),
         )
 
-        return Query(subset_0=subset_0, subset_1=subset_1)
+        return Query(mask=mask, offsets=offsets)
 
     def extract(self, response: Response) -> bytes:
         """

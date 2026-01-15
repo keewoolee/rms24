@@ -55,9 +55,6 @@ class Params:
         if self._c % 2 == 1:
             self._c += 1
 
-        # Padded n for block arithmetic
-        self._n_padded = self._c * self.w
-
         # Number of regular hints (paper: M = λ * w)
         self._num_reg_hints = self.lambda_ * self.w
 
@@ -74,19 +71,9 @@ class Params:
         return self._c
 
     @property
-    def n_padded(self) -> int:
-        """Padded n = c * w. Indices >= n return zero entries."""
-        return self._n_padded
-
-    @property
     def num_reg_hints(self) -> int:
         """Number of regular hints (paper: M = λ * w)."""
         return self._num_reg_hints
-
-    @property
-    def half_c(self) -> int:
-        """c/2 - number of blocks in each half."""
-        return self._c // 2
 
     def block_of(self, index: int) -> int:
         """Return the block index for a given database index."""
