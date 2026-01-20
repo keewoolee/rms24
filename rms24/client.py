@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 from .params import Params
-from .protocol import Query, Response
+from .protocol import Query, Response, EntryUpdate
 from .prf import PRF, find_median_cutoff, block_selected
 from .hint import RegHint, BackupHint, HintStorage
 from .utils import xor_bytes, zero_entry
@@ -37,7 +37,7 @@ class Client:
         self.params = params
         self.prf: Optional[PRF] = None
         self.hints = HintStorage()
-        self._query_state: Optional[_QueryState] = None
+        self._query_states: list[_QueryState] = []
 
     def generate_hints(self, db_stream: Iterator[tuple[int, list[bytes]]]) -> None:
         """
@@ -50,7 +50,7 @@ class Client:
         """
         self.prf = PRF()
         self.hints = HintStorage()
-        self._query_state = None
+        self._query_states = []
 
         num_reg_hints = self.params.num_reg_hints
         c = self.params.c  # number of blocks
@@ -138,137 +138,232 @@ class Client:
             )
             self.hints.backup_hints.append(backup)
 
-    def query(self, index: int) -> Query:
+    def query(self, indices: list[int]) -> list[Query]:
         """
-        Prepare online query.
+        Prepare queries for multiple indices.
+
+        Note: Failure probability increases with batch size.
+        Each query requires a distinct hint containing its index.
 
         Args:
-            index: Database index to retrieve
+            indices: List of database indices to retrieve
 
         Returns:
-            Query to send to server
+            List of queries to send to server
         """
         if not self.hints.reg_hints:
             raise RuntimeError("Must call generate_hints() before querying")
 
-        if self._query_state is not None:
-            raise RuntimeError("Previous query not yet completed")
+        if self._query_states:
+            raise RuntimeError("Previous query batch not yet completed")
 
-        queried_block = self.params.block_of(index)
-        queried_offset = self.params.offset_in_block(index)
         c = self.params.c
         w = self.params.w
+        n = len(indices)
 
-        # Find a hint whose subset contains the queried index
-        result = self.hints.find_hint(queried_block, queried_offset, self.prf, w)
-        if result is None:
-            raise RuntimeError(f"No hint found containing index {index}")
+        # Precompute (block, offset) for all indices
+        targets = [
+            (self.params.block_of(idx), self.params.offset_in_block(idx))
+            for idx in indices
+        ]
 
-        hint_pos, hint = result
-        j = hint.hint_id
-        extra_block, extra_offset = hint.extra
+        # Results indexed by position (to preserve order)
+        queries: list[Query | None] = [None] * n
+        states: list[_QueryState | None] = [None] * n
+        remaining: set[int] = set(range(n))  # positions not yet matched
 
-        # Build mask and offsets in a single pass (Vitalik Buterin's trick)
-        # Offsets are shared by position between real and dummy subsets
-        real_is_first = secrets.randbelow(2) == 0
-        mask_int = 0
-        offsets = []
+        # Flipped loop: iterate hints, check remaining indices
+        for hint_pos, hint in enumerate(self.hints.reg_hints):
+            if not remaining:
+                break
 
-        for k in range(c):
-            if k == queried_block:
-                is_real = False
-            elif block_selected(self.prf.select(j, k), hint.cutoff, hint.flip):
-                is_real = True
-            elif k == extra_block:
-                is_real = True
-            else:
-                is_real = False
+            # Check if this hint matches any remaining index
+            matched_pos = None
+            for i in remaining:
+                if hint.contains(targets[i][0], targets[i][1], self.prf, w):
+                    matched_pos = i
+                    break
 
-            if is_real:
-                if k == extra_block:
-                    offsets.append(extra_offset)
+            if matched_pos is None:
+                continue
+
+            remaining.remove(matched_pos)
+            queried_block, queried_offset = targets[matched_pos]
+            j = hint.hint_id
+            extra_block, extra_offset = hint.extra
+
+            # Build mask and offsets in a single pass (Vitalik Buterin's trick)
+            real_is_first = secrets.randbelow(2) == 0
+            mask_int = 0
+            offsets = []
+
+            for k in range(c):
+                if k == queried_block:
+                    is_real = False
+                elif block_selected(self.prf.select(j, k), hint.cutoff, hint.flip):
+                    is_real = True
+                elif k == extra_block:
+                    is_real = True
                 else:
-                    offsets.append(self.prf.offset(j, k) % w)
+                    is_real = False
 
-            if is_real == real_is_first:
-                mask_int |= 1 << k
+                if is_real:
+                    if k == extra_block:
+                        offsets.append(extra_offset)
+                    else:
+                        offsets.append(self.prf.offset(j, k) % w)
 
-        mask = mask_int.to_bytes((c + 7) // 8, "little")
+                if is_real == real_is_first:
+                    mask_int |= 1 << k
 
-        self._query_state = _QueryState(
-            real_is_first=real_is_first,
-            hint=hint,
-            hint_pos=hint_pos,
-            queried=(queried_block, queried_offset),
-        )
+            mask = mask_int.to_bytes((c + 7) // 8, "little")
 
-        return Query(mask=mask, offsets=offsets)
+            queries[matched_pos] = Query(mask=mask, offsets=offsets)
+            states[matched_pos] = _QueryState(
+                real_is_first=real_is_first,
+                hint=hint,
+                hint_pos=hint_pos,
+                queried=(queried_block, queried_offset),
+            )
 
-    def extract(self, response: Response) -> bytes:
+        if remaining:
+            unmatched = [indices[i] for i in remaining]
+            raise RuntimeError(f"No hints found for indices: {unmatched}")
+
+        self._query_states = states
+
+        return queries
+
+    def extract(self, responses: list[Response]) -> list[bytes]:
         """
-        Extract result from server response.
+        Extract results from server responses.
 
         Args:
-            response: Response from server
+            responses: List of responses from server
 
         Returns:
-            Database entry at the queried index
+            List of database entries at the queried indices
         """
-        if self._query_state is None:
+        if not self._query_states:
             raise RuntimeError("Must call query() before extract()")
 
-        real_parity = response.parity_0 if self._query_state.real_is_first else response.parity_1
-        entry = xor_bytes(real_parity, self._query_state.hint.parity)
+        if len(responses) != len(self._query_states):
+            raise RuntimeError(
+                f"Response count ({len(responses)}) doesn't match query count ({len(self._query_states)})"
+            )
 
-        # Store entry in state for replenish
-        self._query_state.entry = entry
+        results = []
+        for state, response in zip(self._query_states, responses):
+            real_parity = response.parity_0 if state.real_is_first else response.parity_1
+            entry = xor_bytes(real_parity, state.hint.parity)
+            state.entry = entry
+            results.append(entry)
 
-        return entry
+        return results
 
-    def replenish_hint(self) -> None:
+    def replenish_hints(self) -> None:
         """
-        Replenish the consumed hint using a backup hint.
+        Replenish all consumed hints using backup hints.
 
-        Must be called after extract() to complete the query.
+        Must be called after extract() to complete the query batch.
         """
-        if self._query_state is None:
-            raise RuntimeError("Must call query() before replenish_hint()")
+        if not self._query_states:
+            raise RuntimeError("Must call query() before replenish_hints()")
 
-        if self._query_state.entry is None:
-            raise RuntimeError("Must call extract() before replenish_hint()")
+        for state in self._query_states:
+            if state.entry is None:
+                raise RuntimeError("Must call extract() before replenish_hints()")
 
-        # Get next unused backup hint
-        if not self.hints.backup_hints:
-            raise RuntimeError("No backup hints remaining")
-        backup = self.hints.backup_hints.pop()
+        if len(self.hints.backup_hints) < len(self._query_states):
+            raise RuntimeError(
+                f"Not enough backup hints ({len(self.hints.backup_hints)}) "
+                f"for {len(self._query_states)} queries"
+            )
 
-        queried_block, queried_offset = self._query_state.queried
-        queried_entry = self._query_state.entry
+        for state in self._query_states:
+            backup = self.hints.backup_hints.pop()
 
-        # Check which half does NOT contain the queried block
-        v = self.prf.select(backup.hint_id, queried_block)
+            queried_block, queried_offset = state.queried
+            queried_entry = state.entry
 
-        if v >= backup.cutoff:
-            # Queried block is in "high" half (v >= cutoff), use low half
-            parity = backup.parity_low
-            flip = False
-        else:
-            # Queried block is in "low" half (v < cutoff), use high half
-            parity = backup.parity_high
-            flip = True
+            # Check which half does NOT contain the queried block
+            v = self.prf.select(backup.hint_id, queried_block)
 
-        # Create new regular hint with queried position as extra
-        new_hint = RegHint(
-            hint_id=backup.hint_id,
-            cutoff=backup.cutoff,
-            extra=(queried_block, queried_offset),
-            parity=xor_bytes(parity, queried_entry),
-            flip=flip,
-        )
+            if v >= backup.cutoff:
+                # Queried block is in "high" half (v >= cutoff), use low half
+                parity = backup.parity_low
+                flip = False
+            else:
+                # Queried block is in "low" half (v < cutoff), use high half
+                parity = backup.parity_high
+                flip = True
 
-        # Replace consumed hint
-        self.hints.reg_hints[self._query_state.hint_pos] = new_hint
-        self._query_state = None
+            # Create new regular hint with queried position as extra
+            new_hint = RegHint(
+                hint_id=backup.hint_id,
+                cutoff=backup.cutoff,
+                extra=(queried_block, queried_offset),
+                parity=xor_bytes(parity, queried_entry),
+                flip=flip,
+            )
+
+            # Replace consumed hint
+            self.hints.reg_hints[state.hint_pos] = new_hint
+
+        self._query_states = []
+
+    def update_hints(self, updates: list[EntryUpdate]) -> None:
+        """
+        Update hints affected by database entry changes.
+
+        Args:
+            updates: List of EntryUpdate containing index and delta
+        """
+        if not self.hints.reg_hints:
+            raise RuntimeError("Must call generate_hints() before update_hints()")
+
+        if not updates:
+            return
+
+        w = self.params.w
+
+        # Group updates by block: block -> {offset: delta}
+        by_block: dict[int, dict[int, bytes]] = {}
+        for u in updates:
+            block = self.params.block_of(u.index)
+            offset = self.params.offset_in_block(u.index)
+            if block not in by_block:
+                by_block[block] = {}
+            by_block[block][offset] = u.delta
+
+        # Update regular hints
+        for hint in self.hints.reg_hints:
+            ex_block, ex_offset = hint.extra
+
+            # Check extra
+            if ex_block in by_block and ex_offset in by_block[ex_block]:
+                hint.parity = xor_bytes(hint.parity, by_block[ex_block][ex_offset])
+
+            # Check selected blocks (one PRF call per block)
+            for block, offsets in by_block.items():
+                v = self.prf.select(hint.hint_id, block)
+                if not block_selected(v, hint.cutoff, hint.flip):
+                    continue
+                r = self.prf.offset(hint.hint_id, block) % w
+                if r in offsets:
+                    hint.parity = xor_bytes(hint.parity, offsets[r])
+
+        # Update backup hints
+        for backup in self.hints.backup_hints:
+            for block, offsets in by_block.items():
+                v = self.prf.select(backup.hint_id, block)
+                r = self.prf.offset(backup.hint_id, block) % w
+
+                if r in offsets:
+                    if v < backup.cutoff:
+                        backup.parity_low = xor_bytes(backup.parity_low, offsets[r])
+                    else:
+                        backup.parity_high = xor_bytes(backup.parity_high, offsets[r])
 
     def remaining_queries(self) -> int:
         """Return number of queries remaining before offline phase needed."""

@@ -159,25 +159,25 @@ class TestEndToEnd:
         client.generate_hints(server.stream_database())
 
         # Query index 0
-        query = client.query(0)
-        response = server.answer(query)
-        result = client.extract(response)
-        client.replenish_hint()
+        queries = client.query([0])
+        responses = server.answer(queries)
+        [result] = client.extract(responses)
+        client.replenish_hints()
         assert result == db[0]
 
     def test_multiple_queries(self, small_setup):
         params, db, server, client = small_setup
         client.generate_hints(server.stream_database())
 
-        # Query multiple indices
+        # Query multiple indices one at a time
         test_indices = [0, 1, 10, 50, 100, params.n - 1]
         for idx in test_indices:
             if client.remaining_queries() == 0:
                 break
-            query = client.query(idx)
-            response = server.answer(query)
-            result = client.extract(response)
-            client.replenish_hint()
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
             assert result == db[idx], f"Mismatch at index {idx}"
 
     def test_random_queries(self, small_setup):
@@ -188,10 +188,10 @@ class TestEndToEnd:
         num_queries = min(20, client.remaining_queries())
         for _ in range(num_queries):
             idx = secrets.randbelow(params.n)
-            query = client.query(idx)
-            response = server.answer(query)
-            result = client.extract(response)
-            client.replenish_hint()
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
             assert result == db[idx], f"Mismatch at index {idx}"
 
     def test_repeated_queries_same_index(self, small_setup):
@@ -201,10 +201,10 @@ class TestEndToEnd:
         # Query the same index multiple times
         idx = 42
         for _ in range(min(5, client.remaining_queries())):
-            query = client.query(idx)
-            response = server.answer(query)
-            result = client.extract(response)
-            client.replenish_hint()
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
             assert result == db[idx]
 
     def test_random_database(self):
@@ -219,11 +219,26 @@ class TestEndToEnd:
         # Query random indices
         for _ in range(min(10, client.remaining_queries())):
             idx = secrets.randbelow(params.n)
-            query = client.query(idx)
-            response = server.answer(query)
-            result = client.extract(response)
-            client.replenish_hint()
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
             assert result == db[idx]
+
+    def test_batch_query(self, small_setup):
+        """Test querying multiple indices in a single batch."""
+        params, db, server, client = small_setup
+        client.generate_hints(server.stream_database())
+
+        # Query multiple indices in one batch
+        indices = [0, 10, 50, 100]
+        queries = client.query(indices)
+        responses = server.answer(queries)
+        results = client.extract(responses)
+        client.replenish_hints()
+
+        for idx, result in zip(indices, results):
+            assert result == db[idx], f"Mismatch at index {idx}"
 
 
 class TestHintReplenishment:
@@ -239,16 +254,16 @@ class TestHintReplenishment:
         initial_remaining = client.remaining_queries()
 
         # Each query should decrease remaining by 1
-        query = client.query(0)
-        response = server.answer(query)
-        client.extract(response)
-        client.replenish_hint()
+        queries = client.query([0])
+        responses = server.answer(queries)
+        client.extract(responses)
+        client.replenish_hints()
         assert client.remaining_queries() == initial_remaining - 1
 
-        query = client.query(1)
-        response = server.answer(query)
-        client.extract(response)
-        client.replenish_hint()
+        queries = client.query([1])
+        responses = server.answer(queries)
+        client.extract(responses)
+        client.replenish_hints()
         assert client.remaining_queries() == initial_remaining - 2
 
     def test_hint_contains_queried_index(self):
@@ -262,18 +277,114 @@ class TestHintReplenishment:
 
         # Query an index
         idx = 42
-        query = client.query(idx)
-        response = server.answer(query)
-        client.extract(response)
-        client.replenish_hint()
+        queries = client.query([idx])
+        responses = server.answer(queries)
+        client.extract(responses)
+        client.replenish_hints()
 
         # The replenished hint should contain idx
         # We can verify by querying it again
-        query = client.query(idx)
-        response = server.answer(query)
-        result = client.extract(response)
-        client.replenish_hint()
+        queries = client.query([idx])
+        responses = server.answer(queries)
+        [result] = client.extract(responses)
+        client.replenish_hints()
         assert result == db[idx]
+
+
+class TestUpdates:
+    """Test database update functionality."""
+
+    @pytest.fixture
+    def setup(self):
+        """Setup for update tests."""
+        params = Params(n=256, entry_size=16, lambda_=20)
+        db = create_sequential_database(params.n, params.entry_size)
+        server = Server(db, params)
+        client = Client(params)
+        client.generate_hints(server.stream_database())
+        return params, db, server, client
+
+    def test_query_after_update(self, setup):
+        """Query returns updated value after update."""
+        params, db, server, client = setup
+
+        idx = 42
+        new_value = b"updated value!!!"  # 16 bytes
+
+        updates = server.update_entries({idx: new_value})
+        client.update_hints(updates)
+
+        queries = client.query([idx])
+        responses = server.answer(queries)
+        [result] = client.extract(responses)
+        client.replenish_hints()
+
+        assert result == new_value
+
+    def test_multiple_updates_same_entry(self, setup):
+        """Multiple updates to the same entry work correctly."""
+        params, db, server, client = setup
+
+        idx = 10
+        values = [b"first update!!!!", b"second update!!!", b"third update!!!!"]
+
+        for new_value in values:
+            updates = server.update_entries({idx: new_value})
+            client.update_hints(updates)
+
+        queries = client.query([idx])
+        responses = server.answer(queries)
+        [result] = client.extract(responses)
+        client.replenish_hints()
+
+        assert result == values[-1]
+
+    def test_batch_updates(self, setup):
+        """Batch updates to different entries work correctly."""
+        params, db, server, client = setup
+
+        update_map = {
+            5: b"value for 5!!!!!",
+            50: b"value for 50!!!!",
+            100: b"value for 100!!!",
+        }
+
+        updates = server.update_entries(update_map)
+        client.update_hints(updates)
+
+        for idx, expected in update_map.items():
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
+            assert result == expected, f"Mismatch at index {idx}"
+
+    def test_update_doesnt_break_unrelated_queries(self, setup):
+        """Updates don't affect queries to unmodified entries."""
+        params, db, server, client = setup
+
+        # Update entry 10
+        updates = server.update_entries({10: b"new value!!!!!!!"})
+        client.update_hints(updates)
+
+        # Query unmodified entries
+        for idx in [0, 1, 20, 100, params.n - 1]:
+            queries = client.query([idx])
+            responses = server.answer(queries)
+            [result] = client.extract(responses)
+            client.replenish_hints()
+            assert result == db[idx], f"Mismatch at unmodified index {idx}"
+
+    def test_update_before_generate_hints_raises(self):
+        """update_hints() raises if called before generate_hints()."""
+        params = Params(n=256, entry_size=16, lambda_=20)
+        db = create_sequential_database(params.n, params.entry_size)
+        server = Server(db, params)
+        client = Client(params)
+
+        updates = server.update_entries({0: b"some new value!!"})
+        with pytest.raises(RuntimeError, match="Must call generate_hints"):
+            client.update_hints(updates)
 
 
 if __name__ == "__main__":

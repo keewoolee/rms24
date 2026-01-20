@@ -28,3 +28,10 @@ class Response:
     """Response from server to client."""
     parity_0: bytes
     parity_1: bytes
+
+
+@dataclass
+class EntryUpdate:
+    """A single database entry update."""
+    index: int
+    delta: bytes  # old_value ⊕ new_value

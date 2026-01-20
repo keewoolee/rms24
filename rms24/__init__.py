@@ -9,9 +9,23 @@ Reference: https://eprint.iacr.org/2023/1072
 """
 
 from .params import Params
-from .protocol import Query, Response
+from .protocol import Query, Response, EntryUpdate
 from .client import Client
 from .server import Server
+from .cuckoo import CuckooParams, CuckooTable
+from .keyword_pir import KeywordParams, KeywordClient, KeywordServer
 
 __version__ = "0.1.0"
-__all__ = ["Params", "Query", "Response", "Client", "Server"]
+__all__ = [
+    "Params",
+    "Query",
+    "Response",
+    "EntryUpdate",
+    "Client",
+    "Server",
+    "CuckooParams",
+    "CuckooTable",
+    "KeywordParams",
+    "KeywordClient",
+    "KeywordServer",
+]
