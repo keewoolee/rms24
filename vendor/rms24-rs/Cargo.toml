@@ -1,0 +1,27 @@
+[package]
+name = "rms24"
+version = "0.1.0"
+edition = "2021"
+description = "RMS24 single-server PIR with CUDA acceleration"
+license = "MIT"
+
+[features]
+default = []
+cuda = ["cudarc", "bytemuck"]
+
+[dependencies]
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+thiserror = "2"
+
+# Optional CUDA deps
+cudarc = { version = "0.12", optional = true }
+bytemuck = { version = "1.14", features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "hint_gen"
+harness = false
