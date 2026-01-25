@@ -4,7 +4,7 @@
 //! Retrieval" (https://eprint.iacr.org/2024/1362).
 
 pub mod params;
-// pub mod prf;
+pub mod prf;
 // pub mod hints;
 // pub mod client;
 // pub mod server;
