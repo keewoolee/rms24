@@ -19,9 +19,9 @@ enum Kernel {
 #[command(name = "bench_gpu_hints")]
 #[command(about = "Benchmark GPU hint generation for RMS24")]
 struct Args {
-    /// Path to database file
+    /// Path to database file (use "synthetic:SIZE_MB" for generated data)
     #[arg(long)]
-    db: PathBuf,
+    db: String,
 
     /// Security parameter (lambda)
     #[arg(long, default_value = "80")]
@@ -60,11 +60,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!("Kernel: {}", kernel_name);
 
-    let db_data = std::fs::read(&args.db)?;
+    let db_data = if args.db.starts_with("synthetic:") {
+        let size_mb: usize = args.db.strip_prefix("synthetic:").unwrap().parse()?;
+        let size_bytes = size_mb * 1024 * 1024;
+        println!("Generating synthetic database: {} MB", size_mb);
+        io::stdout().flush().unwrap();
+        vec![0xABu8; size_bytes]
+    } else {
+        std::fs::read(&args.db)?
+    };
     let num_entries = db_data.len() / args.entry_size;
     println!(
         "Database: {} ({:.2} GB, {} entries)",
-        args.db.display(),
+        args.db,
         db_data.len() as f64 / 1e9,
         num_entries
     );
