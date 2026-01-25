@@ -116,6 +116,11 @@ modal run scripts/modal_run_bench.py --gpu h200 --db /data/mainnet-v3/database.b
 | H200, 100MB synthetic, 1.6K blocks | 100 | 51ms | 1,974 hints/sec |
 | H200, 1GB synthetic, 5.1K blocks | 1,000 | 1.17s | 854 hints/sec |
 | 10x H200, 100MB synthetic (parallel) | 1,000 | 1.78s | 563 hints/sec |
+| 10x H200, shared Phase 1 | 1,000 | 5.17s | 193 hints/sec |
+
+**Distributed (shared Phase 1):**
+- Phase 1 (CPU): 0.30s for 1K hints (was 66s per GPU)
+- Phase 2 limited by cargo build time (~2s/GPU)
 
 **Bottlenecks remaining:**
 1. Phase 1 CPU still slow (66s for 1K hints on 5K blocks) - rayon helps but PRF is sequential
