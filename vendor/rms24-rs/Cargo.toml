@@ -16,7 +16,7 @@ thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 
 # Optional CUDA deps
-cudarc = { version = "0.12", optional = true }
+cudarc = { version = "0.12", optional = true, features = ["cuda-12040"] }
 bytemuck = { version = "1.14", features = ["derive"], optional = true }
 
 [dev-dependencies]
