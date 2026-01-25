@@ -14,11 +14,10 @@
 
 ## In Progress
 
-- [ ] Test GPU kernel on Modal H200
-  ```bash
-  cd vendor/rms24-rs
-  modal run scripts/modal_run_bench.py --gpu h200 --max-hints 100000
-  ```
+- [x] Test GPU kernel on Modal H200 (2026-01-25)
+  - 1K hints on 73GB mainnet: 10.2s avg (98 hints/sec)
+  - Bottleneck: 42K blocks per hint, no warp optimization
+  - Next: Add precomputed subsets + warp parallelism
 
 ## Next Up
 
@@ -86,5 +85,16 @@ modal run scripts/modal_run_bench.py --gpu h200 --db /data/mainnet-v3/database.b
 ### Performance Targets
 
 - CPU PRF: 139 ns/call (achieved)
-- GPU hint gen: TBD (need Modal test)
+- GPU hint gen: 98 hints/sec (current, unoptimized)
 - Target: Match Plinko's ~500K hints/sec on H200
+
+### Benchmark Results (2026-01-25)
+
+| Config | Hints | GPU Time | Throughput |
+|--------|-------|----------|------------|
+| H200, 73GB mainnet, 42K blocks | 1,000 | 10.2s | 98 hints/sec |
+
+**Bottlenecks identified:**
+1. No precomputed subsets (each hint checks all 42K blocks)
+2. No warp-level parallelism (Plinko shares key loads)
+3. Phase 1 CPU slow (4.3s for 1K hints)
