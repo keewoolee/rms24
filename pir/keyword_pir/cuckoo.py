@@ -1,9 +1,9 @@
 """
-Cuckoo hashing for Keyword PIR.
+Cuckoo hashing for KPIR (Section 5, eprint 2019/1483).
 
-Cuckoo hashing maps D key-value pairs into n buckets using κ hash functions,
-where each bucket contains at most one item. This enables converting sparse
-keyword queries to dense index PIR.
+Maps key-value pairs into buckets using num_hashes hash functions, where each
+bucket contains at most one item. Enables converting sparse keyword queries to
+dense index PIR.
 """
 
 import hashlib
@@ -16,11 +16,12 @@ from typing import Optional
 class CuckooParams:
     """Parameters for cuckoo hash table."""
 
+    num_buckets: int  # Number of buckets
     key_size: int  # Size of keys in bytes
     value_size: int  # Size of values in bytes
-    num_hashes: int  # κ: number of hash functions
-    num_buckets: int  # n: number of buckets
-    max_evictions: int = 500  # Max eviction chain length before using stash
+    num_hashes: int  # Number of hash functions
+    max_evictions: int = 100  # Max eviction chain length before using stash
+    seed: Optional[bytes] = None  # Hash seed (generated if not provided)
 
     def __post_init__(self):
         if self.key_size < 2:
@@ -31,6 +32,8 @@ class CuckooParams:
             raise ValueError("num_hashes must be at least 2")
         if self.num_buckets < 1:
             raise ValueError("num_buckets must be at least 1")
+        if self.seed is None:
+            self.seed = secrets.token_bytes(16)
 
     @property
     def entry_size(self) -> int:
@@ -42,28 +45,29 @@ class CuckooHash:
     """
     Cuckoo hash functions.
 
-    Uses SHA256 with different prefixes to create κ independent hash functions.
+    Uses SHA256 with different prefixes to create num_hashes independent hash functions.
+    Note: A cryptographic hash is not required; SHA256 is used for convenience.
     """
 
-    def __init__(self, num_hashes: int, num_buckets: int, seed: Optional[bytes] = None):
+    def __init__(self, num_hashes: int, num_buckets: int, seed: bytes):
         """
         Initialize cuckoo hash functions.
 
         Args:
-            num_hashes: Number of hash functions (κ)
-            num_buckets: Number of buckets (n)
-            seed: Optional seed for reproducibility
+            num_hashes: Number of hash functions
+            num_buckets: Number of buckets
+            seed: Hash seed
         """
         self.num_hashes = num_hashes
         self.num_buckets = num_buckets
-        self.seed = seed if seed is not None else secrets.token_bytes(16)
+        self.seed = seed
 
     def hash(self, hash_idx: int, key: bytes) -> int:
         """
         Compute hash function H_i(key).
 
         Args:
-            hash_idx: Which hash function (0 to κ-1)
+            hash_idx: Which hash function (0 to num_hashes-1)
             key: The key to hash
 
         Returns:
@@ -87,7 +91,7 @@ class CuckooHash:
             key: The key to hash
 
         Returns:
-            List of κ bucket indices
+            List of num_hashes bucket indices
         """
         return [self.hash(i, key) for i in range(self.num_hashes)]
 
@@ -100,27 +104,21 @@ class CuckooTable:
     Items that fail insertion go to a stash (overflow area).
     """
 
-    def __init__(self, params: CuckooParams, seed: Optional[bytes] = None):
+    def __init__(self, params: CuckooParams):
         """
         Initialize empty cuckoo table.
 
         Args:
-            params: Cuckoo parameters
-            seed: Optional seed for hash functions
+            params: Cuckoo parameters (includes seed)
         """
         self.params = params
-        self.hasher = CuckooHash(params.num_hashes, params.num_buckets, seed)
+        self.hasher = CuckooHash(params.num_hashes, params.num_buckets, params.seed)
 
         # Each bucket is (key, value) or None
         self._buckets: list[Optional[tuple[bytes, bytes]]] = [None] * params.num_buckets
         self._stash: list[tuple[bytes, bytes]] = []
 
-    @property
-    def seed(self) -> bytes:
-        """Get the hash seed (needed by client)."""
-        return self.hasher.seed
-
-    def insert(self, key: bytes, value: bytes) -> None:
+    def insert(self, key: bytes, value: bytes) -> list[tuple[int, bytes]]:
         """
         Insert a key-value pair.
 
@@ -131,6 +129,10 @@ class CuckooTable:
         Args:
             key: Key (must be exactly key_size bytes)
             value: Value (must be exactly value_size bytes)
+
+        Returns:
+            List of (bucket_idx, entry) for all modified buckets.
+            Empty list if item went to stash.
 
         Raises:
             ValueError: If key or value has wrong size
@@ -144,7 +146,7 @@ class CuckooTable:
                 f"Value size mismatch: {len(value)} != {self.params.value_size}"
             )
 
-        # Try to insert with eviction chain
+        changes: list[tuple[int, bytes]] = []
         current_key, current_value = key, value
 
         for _ in range(self.params.max_evictions):
@@ -154,40 +156,51 @@ class CuckooTable:
             for pos in positions:
                 if self._buckets[pos] is None:
                     self._buckets[pos] = (current_key, current_value)
-                    return
+                    changes.append((pos, current_key + current_value))
+                    return changes
 
             # No empty bucket, evict from random position
             evict_pos = secrets.choice(positions)
             evicted = self._buckets[evict_pos]
             self._buckets[evict_pos] = (current_key, current_value)
+            changes.append((evict_pos, current_key + current_value))
             current_key, current_value = evicted
 
         # Eviction chain too long, add to stash
         self._stash.append((current_key, current_value))
+        return changes
 
-    def lookup(self, key: bytes) -> Optional[bytes]:
+    def _find_key(self, key: bytes) -> tuple[Optional[int], Optional[int]]:
         """
-        Look up a key.
+        Find key location.
 
         Args:
-            key: Key to look up
+            key: Key to find (must be exactly key_size bytes)
 
         Returns:
-            Value if found, None otherwise
+            (bucket_idx, None) if in bucket
+            (None, stash_idx) if in stash
+
+        Raises:
+            ValueError: If key has wrong size
+            KeyError: If not found
         """
-        # Check hash positions
+        if len(key) != self.params.key_size:
+            raise ValueError(
+                f"Key size mismatch: {len(key)} != {self.params.key_size}"
+            )
+
         positions = self.hasher.all_positions(key)
         for pos in positions:
             bucket = self._buckets[pos]
             if bucket is not None and bucket[0] == key:
-                return bucket[1]
+                return (pos, None)
 
-        # Check stash
-        for stash_key, stash_value in self._stash:
+        for i, (stash_key, _) in enumerate(self._stash):
             if stash_key == key:
-                return stash_value
+                return (None, i)
 
-        return None
+        raise KeyError(f"Key {key!r} not found in cuckoo table")
 
     def update(self, key: bytes, new_value: bytes) -> Optional[int]:
         """
@@ -204,30 +217,38 @@ class CuckooTable:
             ValueError: If key or new_value has wrong size
             KeyError: If key not found
         """
-        if len(key) != self.params.key_size:
-            raise ValueError(
-                f"Key size mismatch: {len(key)} != {self.params.key_size}"
-            )
         if len(new_value) != self.params.value_size:
             raise ValueError(
                 f"Value size mismatch: {len(new_value)} != {self.params.value_size}"
             )
 
-        # Check buckets
-        positions = self.hasher.all_positions(key)
-        for pos in positions:
-            bucket = self._buckets[pos]
-            if bucket is not None and bucket[0] == key:
-                self._buckets[pos] = (key, new_value)
-                return pos
+        bucket_idx, stash_idx = self._find_key(key)
+        if bucket_idx is not None:
+            self._buckets[bucket_idx] = (key, new_value)
+        else:
+            self._stash[stash_idx] = (key, new_value)
+        return bucket_idx
 
-        # Check stash
-        for i, (stash_key, _) in enumerate(self._stash):
-            if stash_key == key:
-                self._stash[i] = (key, new_value)
-                return None
+    def delete(self, key: bytes) -> Optional[int]:
+        """
+        Delete a key.
 
-        raise KeyError(f"Key {key!r} not found in cuckoo table")
+        Args:
+            key: Key to delete (must be exactly key_size bytes)
+
+        Returns:
+            Bucket index if key was in a bucket, None if key was in stash
+
+        Raises:
+            ValueError: If key has wrong size
+            KeyError: If key not found
+        """
+        bucket_idx, stash_idx = self._find_key(key)
+        if bucket_idx is not None:
+            self._buckets[bucket_idx] = None
+        else:
+            del self._stash[stash_idx]
+        return bucket_idx
 
     @property
     def stash(self) -> list[tuple[bytes, bytes]]:
@@ -239,7 +260,7 @@ class CuckooTable:
         Convert to dense database for PIR.
 
         Returns:
-            List of n entries, each of size entry_size
+            List of num_buckets entries, each of size entry_size
         """
         empty = bytes(self.params.entry_size)
         return [
@@ -249,7 +270,7 @@ class CuckooTable:
 
     @classmethod
     def build(
-        cls, kv_pairs: dict[bytes, bytes], params: CuckooParams, seed: Optional[bytes] = None
+        cls, kv_pairs: dict[bytes, bytes], params: CuckooParams
     ) -> "CuckooTable":
         """
         Build cuckoo table from key-value pairs.
@@ -258,13 +279,12 @@ class CuckooTable:
 
         Args:
             kv_pairs: Dictionary mapping unique keys to values
-            params: Cuckoo parameters
-            seed: Optional seed for hash functions
+            params: Cuckoo parameters (includes seed)
 
         Returns:
             CuckooTable with all pairs inserted (some may be in stash)
         """
-        table = cls(params, seed)
+        table = cls(params)
 
         for key, value in kv_pairs.items():
             table.insert(key, value)

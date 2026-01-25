@@ -7,56 +7,50 @@ import secrets
 import sys
 sys.path.insert(0, "..")
 
-from rms24.params import Params
-from rms24.prf import PRF, find_median_cutoff
-from rms24.client import Client
-from rms24.server import Server
-from rms24.utils import (
-    xor_bytes,
-    create_sequential_database,
-    create_random_database,
-)
+from pir.rms24 import Params, Client, Server
+from pir.rms24.utils import xor_bytes, HMACPRF, find_median_cutoff
+from helpers import create_sequential_database, create_random_database
 
 
 class TestParams:
     """Test parameter computation."""
 
     def test_basic_params(self):
-        params = Params(n=1024, entry_size=32)
-        assert params.n == 1024
-        assert params.w == 32  # default: sqrt(1024) = 32
-        assert params.c == 32  # n/w = 1024/32 = 32
+        params = Params(num_entries=1024, entry_size=32)
+        assert params.num_entries == 1024
+        assert params.block_size == 32  # default: sqrt(1024) = 32
+        assert params.num_blocks == 32  # n/w = 1024/32 = 32
 
     def test_non_power_of_two(self):
         """n doesn't have to be a power of two."""
-        params = Params(n=1000, entry_size=32)
-        assert params.n == 1000
+        params = Params(num_entries=1000, entry_size=32)
+        assert params.num_entries == 1000
         # ceil(sqrt(1000)) = 32, which is even
-        assert params.w == 32
-        assert params.c == 32  # ceil(1000/32) = 32
+        assert params.block_size == 32
+        assert params.num_blocks == 32  # ceil(1000/32) = 32
 
     def test_c_is_even(self):
         """c must be even (hints select c/2 blocks)."""
         # sqrt(100) = 10, w=10, c=ceil(100/10)=10 (even)
-        params = Params(n=100, entry_size=32)
-        assert params.w == 10
-        assert params.c == 10
-        assert params.c % 2 == 0
+        params = Params(num_entries=100, entry_size=32)
+        assert params.block_size == 10
+        assert params.num_blocks == 10
+        assert params.num_blocks % 2 == 0
 
         # sqrt(50) = 7.07, ceil = 8, w=8, c=ceil(50/8)=7 -> 8 (rounded to even)
-        params = Params(n=50, entry_size=32)
-        assert params.w == 8
-        assert params.c == 8  # was 7, rounded up to even
-        assert params.c % 2 == 0
+        params = Params(num_entries=50, entry_size=32)
+        assert params.block_size == 8
+        assert params.num_blocks == 8  # was 7, rounded up to even
+        assert params.num_blocks % 2 == 0
 
         # sqrt(80) = 8.94, ceil = 9, w=9, c=ceil(80/9)=9 -> 10 (rounded to even)
-        params = Params(n=80, entry_size=32)
-        assert params.w == 9
-        assert params.c == 10  # was 9, rounded up to even
-        assert params.c % 2 == 0
+        params = Params(num_entries=80, entry_size=32)
+        assert params.block_size == 9
+        assert params.num_blocks == 10  # was 9, rounded up to even
+        assert params.num_blocks % 2 == 0
 
     def test_block_calculation(self):
-        params = Params(n=1024, entry_size=32)
+        params = Params(num_entries=1024, entry_size=32)
         # Index 0 is in block 0
         assert params.block_of(0) == 0
         # Index 31 is in block 0
@@ -67,14 +61,14 @@ class TestParams:
         assert params.block_of(1023) == 31
 
     def test_offset_calculation(self):
-        params = Params(n=1024, entry_size=32)
+        params = Params(num_entries=1024, entry_size=32)
         assert params.offset_in_block(0) == 0
         assert params.offset_in_block(31) == 31
         assert params.offset_in_block(32) == 0
         assert params.offset_in_block(33) == 1
 
     def test_index_from_block_offset(self):
-        params = Params(n=1024, entry_size=32)
+        params = Params(num_entries=1024, entry_size=32)
         assert params.index_from_block_offset(0, 0) == 0
         assert params.index_from_block_offset(0, 31) == 31
         assert params.index_from_block_offset(1, 0) == 32
@@ -85,13 +79,13 @@ class TestPRF:
     """Test PRF implementation."""
 
     def test_deterministic(self):
-        prf = PRF(b"0" * 16)
+        prf = HMACPRF(b"0" * 32)
         v1 = prf.select(0, 0)
         v2 = prf.select(0, 0)
         assert v1 == v2
 
     def test_different_inputs(self):
-        prf = PRF(b"0" * 16)
+        prf = HMACPRF(b"0" * 32)
         v1 = prf.select(0, 0)
         v2 = prf.select(0, 1)
         v3 = prf.select(1, 0)
@@ -100,20 +94,17 @@ class TestPRF:
 
     def test_median_cutoff(self):
         values = [10, 20, 30, 40, 50, 60]
-        cutoff, unselected = find_median_cutoff(values)
+        cutoff = find_median_cutoff(values)
         below = sum(1 for v in values if v < cutoff)
         at_or_above = sum(1 for v in values if v >= cutoff)
         assert below == 3
         assert at_or_above == 3
-        assert len(unselected) == 3
-        assert all(values[i] >= cutoff for i in unselected)
 
     def test_median_cutoff_collision(self):
-        """When middle values collide, cutoff should be None."""
+        """When middle values collide, cutoff should be 0."""
         values = [10, 20, 30, 30, 50, 60]  # Collision at median
-        cutoff, unselected = find_median_cutoff(values)
-        assert cutoff is None
-        assert unselected == []
+        cutoff = find_median_cutoff(values)
+        assert cutoff == 0
 
 
 class TestXOR:
@@ -140,11 +131,11 @@ class TestEndToEnd:
     def small_setup(self):
         """Small setup for fast tests.
 
-        Note: lambda_=20 ensures negligible failure probability.
+        Note: security_param=40 ensures negligible failure probability.
         With w=16 and M=320 hints, P(no hint contains index) < 10^-4
         """
-        params = Params(n=256, entry_size=16, lambda_=20)
-        db = create_sequential_database(params.n, params.entry_size)
+        params = Params(num_entries=256, entry_size=16, security_param=40)
+        db = create_sequential_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
         return params, db, server, client
@@ -170,7 +161,7 @@ class TestEndToEnd:
         client.generate_hints(server.stream_database())
 
         # Query multiple indices one at a time
-        test_indices = [0, 1, 10, 50, 100, params.n - 1]
+        test_indices = [0, 1, 10, 50, 100, params.num_entries - 1]
         for idx in test_indices:
             if client.remaining_queries() == 0:
                 break
@@ -187,7 +178,7 @@ class TestEndToEnd:
         # Query random indices
         num_queries = min(20, client.remaining_queries())
         for _ in range(num_queries):
-            idx = secrets.randbelow(params.n)
+            idx = secrets.randbelow(params.num_entries)
             queries = client.query([idx])
             responses = server.answer(queries)
             [result] = client.extract(responses)
@@ -209,8 +200,8 @@ class TestEndToEnd:
 
     def test_random_database(self):
         """Test with random (non-sequential) database."""
-        params = Params(n=256, entry_size=32, lambda_=20)
-        db = create_random_database(params.n, params.entry_size)
+        params = Params(num_entries=256, entry_size=32, security_param=40)
+        db = create_random_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
 
@@ -218,7 +209,7 @@ class TestEndToEnd:
 
         # Query random indices
         for _ in range(min(10, client.remaining_queries())):
-            idx = secrets.randbelow(params.n)
+            idx = secrets.randbelow(params.num_entries)
             queries = client.query([idx])
             responses = server.answer(queries)
             [result] = client.extract(responses)
@@ -245,8 +236,8 @@ class TestHintReplenishment:
     """Test hint replenishment (Algorithm 5)."""
 
     def test_queries_exhaust_hints(self):
-        params = Params(n=64, entry_size=8, lambda_=10)
-        db = create_sequential_database(params.n, params.entry_size)
+        params = Params(num_entries=64, entry_size=8, security_param=40)
+        db = create_sequential_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
 
@@ -268,8 +259,8 @@ class TestHintReplenishment:
 
     def test_hint_contains_queried_index(self):
         """After replenishment, new hint should contain queried index."""
-        params = Params(n=256, entry_size=16, lambda_=20)
-        db = create_sequential_database(params.n, params.entry_size)
+        params = Params(num_entries=256, entry_size=16, security_param=40)
+        db = create_sequential_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
 
@@ -297,8 +288,8 @@ class TestUpdates:
     @pytest.fixture
     def setup(self):
         """Setup for update tests."""
-        params = Params(n=256, entry_size=16, lambda_=20)
-        db = create_sequential_database(params.n, params.entry_size)
+        params = Params(num_entries=256, entry_size=16, security_param=40)
+        db = create_sequential_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
         client.generate_hints(server.stream_database())
@@ -368,7 +359,7 @@ class TestUpdates:
         client.update_hints(updates)
 
         # Query unmodified entries
-        for idx in [0, 1, 20, 100, params.n - 1]:
+        for idx in [0, 1, 20, 100, params.num_entries - 1]:
             queries = client.query([idx])
             responses = server.answer(queries)
             [result] = client.extract(responses)
@@ -377,8 +368,8 @@ class TestUpdates:
 
     def test_update_before_generate_hints_raises(self):
         """update_hints() raises if called before generate_hints()."""
-        params = Params(n=256, entry_size=16, lambda_=20)
-        db = create_sequential_database(params.n, params.entry_size)
+        params = Params(num_entries=256, entry_size=16, security_param=40)
+        db = create_sequential_database(params.num_entries, params.entry_size)
         server = Server(db, params)
         client = Client(params)
 

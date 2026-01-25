@@ -8,39 +8,66 @@ import sys
 
 sys.path.insert(0, "..")
 
-from rms24.keyword_pir import KeywordParams, KeywordClient, KeywordServer
+from pir.keyword_pir import KPIRParams, KPIRClient, KPIRServer
+from pir.rms24 import Client as RMS24Client, Server as RMS24Server
 
 
-class TestKeywordParams:
+def create_keyword_setup(
+    num_items: int,
+    key_size: int = 16,
+    value_size: int = 32,
+    security_param: int = 40,
+    expansion_factor: int = 3,
+):
+    """Helper to create keyword PIR setup with RMS24 backend."""
+    kw_params = KPIRParams(
+        num_items_expected=num_items,
+        key_size=key_size,
+        value_size=value_size,
+        expansion_factor=expansion_factor,
+    )
+
+    kv_pairs = {
+        f"key_{i:012d}".encode(): f"value_{i:026d}".encode()
+        for i in range(num_items)
+    }
+
+    server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, security_param)
+    client = KPIRClient.create(kw_params, RMS24Client, security_param)
+
+    return kw_params, kv_pairs, server, client
+
+
+class TestKPIRParams:
     """Test Keyword PIR parameter computation."""
 
     def test_basic_params(self):
-        params = KeywordParams(
-            num_items=1000,
+        params = KPIRParams(
+            num_items_expected=1000,
             key_size=16,
             value_size=32,
         )
-        assert params.num_items == 1000
+        assert params.num_items_expected == 1000
         assert params.key_size == 16
         assert params.value_size == 32
-        assert params.cuckoo_params.num_hashes == 2  # Default κ
+        assert params.cuckoo_params.num_hashes == 2  # Default kappa
         assert params.cuckoo_params.num_buckets >= 1000
 
     def test_default_sizes(self):
-        params = KeywordParams(num_items=100)
+        params = KPIRParams(num_items_expected=100)
         assert params.key_size == 32  # Default
         assert params.value_size == 32  # Default
 
-    def test_pir_params_derived(self):
-        params = KeywordParams(
-            num_items=100,
+    def test_entry_size(self):
+        params = KPIRParams(
+            num_items_expected=100,
             key_size=8,
             value_size=24,
         )
-        # PIR entry_size = key_size + value_size
-        assert params.pir_params.entry_size == 32
-        # PIR n = num_buckets
-        assert params.pir_params.n == params.cuckoo_params.num_buckets
+        # entry_size = key_size + value_size
+        assert params.entry_size == 32
+        # num_buckets = num_items_expected * expansion_factor
+        assert params.num_buckets == 100 * 3
 
 
 class TestKeywordPIREndToEnd:
@@ -49,22 +76,7 @@ class TestKeywordPIREndToEnd:
     @pytest.fixture
     def small_setup(self):
         """Small setup for fast tests."""
-        params = KeywordParams(
-            num_items=50,
-            key_size=16,
-            value_size=32,
-            lambda_=20,
-        )
-        # Create key-value pairs
-        kv_pairs = {}
-        for i in range(50):
-            key = f"key_{i:012d}".encode()
-            value = f"value_{i:026d}".encode()
-            kv_pairs[key] = value
-
-        server = KeywordServer(kv_pairs, params)
-        client = KeywordClient(params, server.cuckoo_seed)
-        return params, kv_pairs, server, client
+        return create_keyword_setup(num_items=50, security_param=40)
 
     def test_offline_phase(self, small_setup):
         params, kv_pairs, server, client = small_setup
@@ -163,20 +175,7 @@ class TestKeywordUpdates:
 
     @pytest.fixture
     def setup(self):
-        params = KeywordParams(
-            num_items=50,
-            key_size=16,
-            value_size=32,
-            lambda_=20,
-        )
-        kv_pairs = {}
-        for i in range(50):
-            key = f"key_{i:012d}".encode()
-            value = f"value_{i:026d}".encode()
-            kv_pairs[key] = value
-
-        server = KeywordServer(kv_pairs, params)
-        client = KeywordClient(params, server.cuckoo_seed)
+        params, kv_pairs, server, client = create_keyword_setup(num_items=50, security_param=40)
         client.generate_hints(server.stream_database())
         return params, kv_pairs, server, client
 
@@ -186,7 +185,7 @@ class TestKeywordUpdates:
         key = b"key_000000000010"
         new_value = b"updated_value_______________!!!!"  # 32 bytes
 
-        updates = server.update_entries({key: new_value})
+        updates = server.update({key: new_value})
         client.update_hints(updates)
 
         queries = client.query([key])
@@ -196,20 +195,50 @@ class TestKeywordUpdates:
 
         assert result == new_value
 
-    def test_update_nonexistent_key_raises(self, setup):
+    def test_insert_new_key(self, setup):
+        params, kv_pairs, server, client = setup
+
+        key = b"new_key_________"  # 16 bytes
+        value = b"new_value_______________________"  # 32 bytes
+
+        updates = server.update({key: value})
+        client.update_hints(updates)
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result == value
+
+    def test_delete_key(self, setup):
+        params, kv_pairs, server, client = setup
+
+        key = b"key_000000000010"
+
+        updates = server.update({key: None})
+        client.update_hints(updates)
+
+        queries = client.query([key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+
+        assert result is None
+
+    def test_delete_nonexistent_key_raises(self, setup):
         params, kv_pairs, server, client = setup
 
         key = b"nonexistent_key!"  # 16 bytes
-        new_value = b"some_value______________________"  # 32 bytes
 
         with pytest.raises(KeyError):
-            server.update_entries({key: new_value})
+            server.update({key: None})
 
     def test_update_doesnt_break_other_keys(self, setup):
         params, kv_pairs, server, client = setup
 
         # Update one key
-        updates = server.update_entries({
+        updates = server.update({
             b"key_000000000010": b"updated_value_______________!!!!"
         })
         client.update_hints(updates)
@@ -228,17 +257,115 @@ class TestKeywordUpdates:
             client.replenish_hints()
             assert result == kv_pairs[key], f"Mismatch for unmodified key {key}"
 
+    def test_batch_insert_update_delete(self, setup):
+        """Test multiple inserts, updates, and deletes in one call."""
+        params, kv_pairs, server, client = setup
+
+        # Batch: insert new key, update existing key, delete existing key
+        updates = server.update({
+            b"new_key_________": b"new_value_______________________",  # insert
+            b"key_000000000005": b"updated_value___________________",  # update
+            b"key_000000000010": None,  # delete
+        })
+        client.update_hints(updates)
+
+        # Verify insert
+        queries = client.query([b"new_key_________"])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+        assert result == b"new_value_______________________"
+
+        # Verify update
+        queries = client.query([b"key_000000000005"])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+        assert result == b"updated_value___________________"
+
+        # Verify delete
+        queries = client.query([b"key_000000000010"])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+        assert result is None
+
+
+class TestKeywordStashOperations:
+    """Test operations involving stash."""
+
+    def test_insert_to_stash(self):
+        """Insert that goes to stash should still be queryable."""
+        # Small table to force stash usage
+        params, kv_pairs, server, client = create_keyword_setup(
+            num_items=10,
+            security_param=40,
+            expansion_factor=1,  # Very tight, will cause stash
+        )
+        client.generate_hints(server.stream_database())
+
+        # Insert more keys - some will go to stash
+        for i in range(10, 15):
+            key = f"key_{i:012d}".encode()
+            value = f"value_{i:026d}".encode()
+            updates = server.update({key: value})
+            client.update_hints(updates)
+
+        # Query all keys including new ones
+        for i in range(15):
+            key = f"key_{i:012d}".encode()
+            expected = f"value_{i:026d}".encode()
+            queries = client.query([key])
+            responses, stash = server.answer(queries)
+            [result] = client.extract(responses, stash)
+            client.replenish_hints()
+            assert result == expected, f"Key {i} not found or wrong value"
+
+    def test_delete_from_stash_via_update(self):
+        """Delete a key that's in stash."""
+        kw_params = KPIRParams(
+            num_items_expected=10,
+            key_size=16,
+            value_size=32,
+            expansion_factor=1,
+        )
+        kv_pairs = {
+            f"key_{i:012d}".encode(): f"value_{i:026d}".encode()
+            for i in range(15)  # More than buckets, some go to stash
+        }
+
+        server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, 40)
+        client = KPIRClient.create(kw_params, RMS24Client, 40)
+        client.generate_hints(server.stream_database())
+
+        # Find a key in stash
+        _, stash = server.answer([])
+        if len(stash) == 0:
+            pytest.skip("No items in stash for this test")
+
+        stash_key, _ = stash[0]
+
+        # Delete it
+        updates = server.update({stash_key: None})
+        client.update_hints(updates)
+
+        # Verify it's gone
+        queries = client.query([stash_key])
+        responses, stash = server.answer(queries)
+        [result] = client.extract(responses, stash)
+        client.replenish_hints()
+        assert result is None
+
 
 class TestKeywordPIRLarger:
     """Test with larger databases."""
 
     def test_larger_database(self):
         """Test with 500 items."""
-        params = KeywordParams(
-            num_items=500,
+        kw_params = KPIRParams(
+            num_items_expected=500,
             key_size=16,
             value_size=64,
-            lambda_=20,
         )
 
         kv_pairs = {}
@@ -247,8 +374,8 @@ class TestKeywordPIRLarger:
             value = secrets.token_bytes(64)
             kv_pairs[key] = value
 
-        server = KeywordServer(kv_pairs, params)
-        client = KeywordClient(params, server.cuckoo_seed)
+        server = KPIRServer.create(kv_pairs, kw_params, RMS24Server, 40)
+        client = KPIRClient.create(kw_params, RMS24Client, 40)
         client.generate_hints(server.stream_database())
 
         # Query random keys
@@ -266,24 +393,15 @@ class TestRemainingQueries:
     """Test remaining_queries tracking."""
 
     def test_remaining_queries_decreases(self):
-        params = KeywordParams(
+        params, kv_pairs, server, client = create_keyword_setup(
             num_items=30,
-            key_size=16,
-            value_size=32,
-            lambda_=10,
+            security_param=40,
         )
-        kv_pairs = {
-            f"key_{i:012d}".encode(): f"value_{i:026d}".encode()
-            for i in range(30)
-        }
-
-        server = KeywordServer(kv_pairs, params)
-        client = KeywordClient(params, server.cuckoo_seed)
         client.generate_hints(server.stream_database())
 
         initial = client.remaining_queries()
 
-        # Each keyword query consumes κ backup hints
+        # Each keyword query consumes kappa backup hints
         queries = client.query([b"key_000000000000"])
         responses, stash = server.answer(queries)
         client.extract(responses, stash)
