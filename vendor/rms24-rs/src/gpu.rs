@@ -20,6 +20,7 @@ pub struct Rms24Params {
     pub num_reg_hints: u32,
     pub num_backup_hints: u32,
     pub total_hints: u32,
+    pub _padding: u32,  // Align to 8 bytes
 }
 
 #[cfg(feature = "cuda")]
@@ -168,7 +169,7 @@ mod tests {
         #[cfg(feature = "cuda")]
         {
             use super::*;
-            assert_eq!(std::mem::size_of::<Rms24Params>(), 32);
+            assert_eq!(std::mem::size_of::<Rms24Params>(), 40);
             assert_eq!(std::mem::size_of::<HintMeta>(), 16);
             assert_eq!(std::mem::size_of::<HintOutput>(), 48);
         }

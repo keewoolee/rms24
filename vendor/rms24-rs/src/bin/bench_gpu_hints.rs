@@ -82,6 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             num_reg_hints: params.num_reg_hints as u32,
             num_backup_hints: params.num_backup_hints as u32,
             total_hints,
+            _padding: 0,
         };
 
         println!("Running Phase 1 (CPU)...");

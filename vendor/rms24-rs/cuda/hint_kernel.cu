@@ -26,6 +26,7 @@ struct Rms24Params {
     uint32_t num_reg_hints;
     uint32_t num_backup_hints;
     uint32_t total_hints;
+    uint32_t _padding;  // Align to 8 bytes
 };
 
 /// Precomputed hint metadata (from CPU Phase 1)
