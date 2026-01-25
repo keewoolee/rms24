@@ -72,8 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use rms24::hints::find_median_cutoff;
         use rms24::prf::Prf;
 
-        println!("Initializing GPU...");
-        let generator = GpuHintGenerator::new(0)?;
+        // Phase 1 on CPU first (GPU is expensive to initialize)
+        println!("Running Phase 1 (CPU)...");
+        let phase1_start = Instant::now();
+
+        let prf = Prf::random();
+        let prf_key = prf.key_u32();
 
         let gpu_params = Rms24Params {
             num_entries: params.num_entries,
@@ -84,12 +88,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_hints,
             _padding: 0,
         };
-
-        println!("Running Phase 1 (CPU)...");
-        let phase1_start = Instant::now();
-
-        let prf = Prf::random();
-        let prf_key = prf.key_u32();
 
         let mut hint_meta = Vec::with_capacity(total_hints as usize);
         for hint_idx in 0..total_hints {
@@ -120,6 +118,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let phase1_time = phase1_start.elapsed();
         println!("Phase 1 complete: {:.2}s", phase1_time.as_secs_f64());
+
+        // Initialize GPU after CPU work
+        println!("\nInitializing GPU...");
+        let generator = GpuHintGenerator::new(0)?;
 
         println!("\nWarming up ({} iterations)...", args.warmup);
         for _ in 0..args.warmup {

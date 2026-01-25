@@ -38,11 +38,25 @@
 - [ ] Keyword client/server wrappers
 - [ ] 8-byte TAG fingerprint verification
 
-### Optimizations
-- [ ] Warp-level parallelism in CUDA kernel (like Plinko)
+### Optimizations (Priority Order)
+
+**Phase 1 CPU optimizations:**
+- [ ] Parallelize Phase 1 with rayon (currently single-threaded)
+- [ ] Cache select_vector results (reused across hints)
+
+**GPU kernel optimizations (to match Plinko's 500K hints/sec):**
+- [ ] Precompute subset bitmasks on CPU, pass to GPU
+  - Current: each hint checks all 42K blocks with PRF
+  - Target: pass precomputed bitmask, only iterate set bits
+- [ ] Warp-level parallelism (like Plinko's `hint_gen_kernel_tiled`)
+  - Share block key loads across 32 threads in warp
+  - Use `__shfl_sync` to broadcast PRF key
 - [ ] Vectorized loads (ulong2) for 16-byte aligned reads
+- [ ] Batch ChaCha12 calls (one block covers multiple PRF outputs)
+
+**Infrastructure:**
 - [ ] Multi-GPU support in Modal script
-- [ ] Pre-derive PRP keys on CPU to reduce GPU work
+- [ ] Streaming hint generation (don't load full 73GB into GPU memory)
 
 ### Testing
 - [ ] Property tests (proptest) for PRF
