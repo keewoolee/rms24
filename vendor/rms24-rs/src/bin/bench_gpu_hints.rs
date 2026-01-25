@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         use rms24::gpu::{GpuHintGenerator, HintMeta, Rms24Params};
         use rms24::hints::find_median_cutoff;
-        use rms24::prf::HmacPrf;
+        use rms24::prf::Prf;
 
         println!("Initializing GPU...");
         let generator = GpuHintGenerator::new(0)?;
@@ -87,8 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Running Phase 1 (CPU)...");
         let phase1_start = Instant::now();
 
-        let prf = HmacPrf::random();
-        let prf_key = [0u32; 8];
+        let prf = Prf::random();
+        let prf_key = prf.key_u32();
 
         let mut hint_meta = Vec::with_capacity(total_hints as usize);
         for hint_idx in 0..total_hints {

@@ -23,9 +23,9 @@ fn bench_cpu_hint_gen(c: &mut Criterion) {
 }
 
 fn bench_prf_operations(c: &mut Criterion) {
-    use rms24::prf::HmacPrf;
+    use rms24::prf::Prf;
 
-    let prf = HmacPrf::new([0u8; 32]);
+    let prf = Prf::new([0u8; 32]);
 
     c.bench_function("prf_select", |b| {
         b.iter(|| prf.select(black_box(0), black_box(0)));

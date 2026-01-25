@@ -2,21 +2,21 @@
 
 use crate::hints::{find_median_cutoff, xor_bytes_inplace, HintState};
 use crate::params::Params;
-use crate::prf::HmacPrf;
+use crate::prf::Prf;
 use rand::Rng;
 
 pub struct Client {
     pub params: Params,
-    pub prf: HmacPrf,
+    pub prf: Prf,
     pub hints: HintState,
 }
 
 impl Client {
     pub fn new(params: Params) -> Self {
-        Self::with_prf(params, HmacPrf::random())
+        Self::with_prf(params, Prf::random())
     }
 
-    pub fn with_prf(params: Params, prf: HmacPrf) -> Self {
+    pub fn with_prf(params: Params, prf: Prf) -> Self {
         let hints = HintState::new(
             params.num_reg_hints as usize,
             params.num_backup_hints as usize,

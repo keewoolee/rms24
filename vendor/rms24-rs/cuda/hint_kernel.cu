@@ -1,8 +1,13 @@
 /**
  * RMS24 GPU Hint Generation Kernel
  *
- * Adapted from Plinko's hint_kernel.cu for RMS24 protocol.
- * Key difference: Uses median-cutoff subset selection instead of iPRF.
+ * Uses ChaCha12 for PRF (matching CPU implementation).
+ * Key difference from Plinko: Uses median-cutoff subset selection instead of iPRF.
+ *
+ * ChaCha12 advantages:
+ * - ARX operations only (no memory lookups like AES)
+ * - GPU-friendly (same implementation as CPU)
+ * - 12 rounds provides sufficient security
  */
 
 #include <cstdint>
@@ -11,6 +16,7 @@
 #define ENTRY_SIZE 40
 #define PARITY_SIZE 48  // 40B aligned to 48B for vectorized loads
 #define WARP_SIZE 32
+#define CHACHA_ROUNDS 12
 
 /// RMS24 parameters for GPU kernel
 struct Rms24Params {
@@ -36,113 +42,90 @@ struct HintOutput {
 };
 
 // ============================================================================
-// SHA-256 for PRF (from Plinko)
+// ChaCha12 Implementation
 // ============================================================================
 
-__device__ __constant__ uint32_t SHA256_K[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
-};
-
-__device__ __constant__ uint32_t SHA256_H0[8] = {
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-};
-
-__device__ __forceinline__ uint32_t rotr(uint32_t x, int n) {
-    return (x >> n) | (x << (32 - n));
+__device__ __forceinline__ void chacha_quarter_round(
+    uint32_t& a, uint32_t& b, uint32_t& c, uint32_t& d
+) {
+    a += b; d ^= a; d = (d << 16) | (d >> 16);
+    c += d; b ^= c; b = (b << 12) | (b >> 20);
+    a += b; d ^= a; d = (d << 8) | (d >> 24);
+    c += d; b ^= c; b = (b << 7) | (b >> 25);
 }
 
-__device__ __forceinline__ uint32_t ch(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (~x & z);
+/**
+ * ChaCha12 block function.
+ *
+ * Nonce layout (12 bytes / 3 u32s):
+ * - nonce[0]: domain tag (0 = select, 1 = offset)
+ * - nonce[1]: hint_id
+ * - nonce[2]: block
+ */
+__device__ void chacha12_block(
+    const uint32_t key[8],
+    uint32_t nonce0,  // domain
+    uint32_t nonce1,  // hint_id
+    uint32_t nonce2,  // block
+    uint32_t output[16]
+) {
+    // ChaCha state: constants || key || counter || nonce
+    uint32_t state[16] = {
+        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,  // "expand 32-byte k"
+        key[0], key[1], key[2], key[3],
+        key[4], key[5], key[6], key[7],
+        0,       // counter (always 0 for PRF)
+        nonce0, nonce1, nonce2
+    };
+
+    uint32_t initial[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) initial[i] = state[i];
+
+    // 12 rounds (6 double-rounds)
+    #pragma unroll
+    for (int i = 0; i < CHACHA_ROUNDS / 2; i++) {
+        // Column round
+        chacha_quarter_round(state[0], state[4], state[8],  state[12]);
+        chacha_quarter_round(state[1], state[5], state[9],  state[13]);
+        chacha_quarter_round(state[2], state[6], state[10], state[14]);
+        chacha_quarter_round(state[3], state[7], state[11], state[15]);
+        // Diagonal round
+        chacha_quarter_round(state[0], state[5], state[10], state[15]);
+        chacha_quarter_round(state[1], state[6], state[11], state[12]);
+        chacha_quarter_round(state[2], state[7], state[8],  state[13]);
+        chacha_quarter_round(state[3], state[4], state[9],  state[14]);
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 16; i++) output[i] = state[i] + initial[i];
 }
 
-__device__ __forceinline__ uint32_t maj(uint32_t x, uint32_t y, uint32_t z) {
-    return (x & y) ^ (x & z) ^ (y & z);
-}
-
-__device__ __forceinline__ uint32_t sigma0(uint32_t x) {
-    return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22);
-}
-
-__device__ __forceinline__ uint32_t sigma1(uint32_t x) {
-    return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25);
-}
-
-__device__ __forceinline__ uint32_t gamma0(uint32_t x) {
-    return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3);
-}
-
-__device__ __forceinline__ uint32_t gamma1(uint32_t x) {
-    return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10);
-}
-
-/// HMAC-SHA256 based PRF for select/offset
-/// Returns 64 bits: high 32 = select value, low 32 = offset value
-__device__ uint64_t hmac_prf(
+/**
+ * ChaCha12-based PRF.
+ *
+ * Domain separation via nonce[0]:
+ * - 0 = select (returns first 32 bits)
+ * - 1 = offset (returns first 64 bits)
+ */
+__device__ uint32_t chacha_prf_select(
     const uint32_t key[8],
     uint32_t hint_id,
-    uint32_t block,
-    bool is_offset
+    uint32_t block
 ) {
-    uint32_t state[8];
-    #pragma unroll
-    for (int i = 0; i < 8; i++) state[i] = SHA256_H0[i];
+    uint32_t output[16];
+    chacha12_block(key, 0, hint_id, block, output);
+    return output[0];
+}
 
-    // Build message: key || prefix || hint_id || block || padding
-    uint32_t w[64];
-    #pragma unroll
-    for (int i = 0; i < 8; i++) w[i] = key[i];
-    
-    // Prefix: "select" or "offset" (6 bytes each)
-    if (is_offset) {
-        w[8] = 0x6f666673;  // "offs"
-        w[9] = 0x65740000;  // "et\0\0"
-    } else {
-        w[8] = 0x73656c65;  // "sele"
-        w[9] = 0x63740000;  // "ct\0\0"
-    }
-    w[10] = hint_id;
-    w[11] = block;
-    w[12] = 0x80000000;  // padding
-    w[13] = 0;
-    w[14] = 0;
-    w[15] = 48 * 8;  // message length in bits (48 bytes)
-
-    // Extend
-    #pragma unroll
-    for (int i = 16; i < 64; i++) {
-        w[i] = gamma1(w[i-2]) + w[i-7] + gamma0(w[i-15]) + w[i-16];
-    }
-
-    // Compress
-    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
-    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
-
-    #pragma unroll
-    for (int i = 0; i < 64; i++) {
-        uint32_t t1 = h + sigma1(e) + ch(e,f,g) + SHA256_K[i] + w[i];
-        uint32_t t2 = sigma0(a) + maj(a,b,c);
-        h = g; g = f; f = e; e = d + t1;
-        d = c; c = b; b = a; a = t1 + t2;
-    }
-
-    // Return first 64 bits
-    return ((uint64_t)(state[0] + a) << 32) | (state[1] + b);
+__device__ uint64_t chacha_prf_offset(
+    const uint32_t key[8],
+    uint32_t hint_id,
+    uint32_t block
+) {
+    uint32_t output[16];
+    chacha12_block(key, 1, hint_id, block, output);
+    return ((uint64_t)output[1] << 32) | output[0];
 }
 
 // ============================================================================
@@ -159,7 +142,7 @@ __device__ uint64_t hmac_prf(
  */
 extern "C" __global__ void rms24_hint_gen_kernel(
     const Rms24Params params,
-    const uint32_t* __restrict__ prf_key,  // 8 u32s
+    const uint32_t* __restrict__ prf_key,  // 8 u32s (256-bit ChaCha key)
     const HintMeta* __restrict__ hint_meta,
     const uint8_t* __restrict__ entries,
     HintOutput* __restrict__ output,
@@ -187,11 +170,10 @@ extern "C" __global__ void rms24_hint_gen_kernel(
     bool is_regular = hint_idx < params.num_reg_hints;
 
     for (uint64_t block = 0; block < params.num_blocks; block++) {
-        // Compute PRF values
-        uint64_t select_prf = hmac_prf(key, hint_idx, (uint32_t)block, false);
-        uint64_t offset_prf = hmac_prf(key, hint_idx, (uint32_t)block, true);
+        // Compute PRF values using ChaCha12
+        uint32_t select_value = chacha_prf_select(key, hint_idx, (uint32_t)block);
+        uint64_t offset_prf = chacha_prf_offset(key, hint_idx, (uint32_t)block);
         
-        uint32_t select_value = (uint32_t)(select_prf >> 32);
         uint64_t picked_offset = offset_prf % params.block_size;
         uint64_t entry_idx = block * params.block_size + picked_offset;
 

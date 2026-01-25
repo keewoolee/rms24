@@ -10,8 +10,7 @@ default = []
 cuda = ["cudarc", "bytemuck"]
 
 [dependencies]
-sha2 = "0.10"
-hmac = "0.12"
+chacha20 = "0.9"
 rand = "0.8"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }

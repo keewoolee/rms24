@@ -13,3 +13,4 @@ pub mod client;
 pub mod gpu;
 
 pub use params::Params;
+pub use prf::Prf;

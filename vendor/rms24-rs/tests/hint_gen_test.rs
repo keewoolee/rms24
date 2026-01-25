@@ -86,8 +86,8 @@ fn test_deterministic_with_same_prf() {
     let params = Params::new(100, 40, 4);
     let prf_key = [0u8; 32];
     
-    let mut client1 = Client::with_prf(params.clone(), rms24::prf::HmacPrf::new(prf_key));
-    let mut client2 = Client::with_prf(params, rms24::prf::HmacPrf::new(prf_key));
+    let mut client1 = Client::with_prf(params.clone(), rms24::prf::Prf::new(prf_key));
+    let mut client2 = Client::with_prf(params, rms24::prf::Prf::new(prf_key));
     
     let db = vec![0x42u8; 100 * 40];
     
