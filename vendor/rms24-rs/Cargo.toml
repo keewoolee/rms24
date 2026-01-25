@@ -14,6 +14,7 @@ sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 thiserror = "2"
+clap = { version = "4", features = ["derive"] }
 
 # Optional CUDA deps
 cudarc = { version = "0.12", optional = true }
@@ -25,3 +26,7 @@ criterion = "0.5"
 [[bench]]
 name = "hint_gen"
 harness = false
+
+[[bin]]
+name = "bench_gpu_hints"
+required-features = ["cuda"]
