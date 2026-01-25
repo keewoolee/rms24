@@ -4,6 +4,7 @@ use crate::hints::{find_median_cutoff, xor_bytes_inplace, HintState, HintSubset}
 use crate::params::Params;
 use crate::prf::Prf;
 use rand::Rng;
+use rayon::prelude::*;
 
 pub struct Client {
     pub params: Params,
@@ -29,6 +30,7 @@ impl Client {
     ///
     /// Phase 1 only: computes cutoffs and subset membership.
     /// Does NOT stream database or compute parities.
+    /// Uses rayon for parallel processing across hints.
     pub fn generate_subsets(&self) -> Vec<HintSubset> {
         let p = &self.params;
         let num_total = (p.num_reg_hints + p.num_backup_hints) as usize;
@@ -36,42 +38,40 @@ impl Client {
         let num_blocks = p.num_blocks as u32;
         let block_size = p.block_size as u64;
 
-        let mut rng = rand::thread_rng();
-        let mut subsets = Vec::with_capacity(num_total);
+        (0..num_total)
+            .into_par_iter()
+            .map(|hint_idx| {
+                let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
+                let cutoff = find_median_cutoff(&select_values);
 
-        for hint_idx in 0..num_total {
-            let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
-            let cutoff = find_median_cutoff(&select_values);
+                let mut subset = HintSubset::new();
+                subset.is_regular = hint_idx < num_reg;
 
-            let mut subset = HintSubset::new();
-            subset.is_regular = hint_idx < num_reg;
-
-            if cutoff == 0 {
-                subsets.push(subset);
-                continue;
-            }
-
-            let mut high_blocks = Vec::new();
-            for block in 0..num_blocks {
-                let offset = (self.prf.offset(hint_idx as u32, block) % block_size) as u32;
-                if select_values[block as usize] < cutoff {
-                    subset.blocks.push(block);
-                    subset.offsets.push(offset);
-                } else {
-                    high_blocks.push((block, offset));
+                if cutoff == 0 {
+                    return subset;
                 }
-            }
 
-            if hint_idx < num_reg && !high_blocks.is_empty() {
-                let idx = rng.gen_range(0..high_blocks.len());
-                subset.extra_block = high_blocks[idx].0;
-                subset.extra_offset = rng.gen_range(0..block_size as u32);
-            }
+                let mut high_blocks = Vec::new();
+                for block in 0..num_blocks {
+                    let offset = (self.prf.offset(hint_idx as u32, block) % block_size) as u32;
+                    if select_values[block as usize] < cutoff {
+                        subset.blocks.push(block);
+                        subset.offsets.push(offset);
+                    } else {
+                        high_blocks.push((block, offset));
+                    }
+                }
 
-            subsets.push(subset);
-        }
+                if hint_idx < num_reg && !high_blocks.is_empty() {
+                    let mut rng = rand::thread_rng();
+                    let idx = rng.gen_range(0..high_blocks.len());
+                    subset.extra_block = high_blocks[idx].0;
+                    subset.extra_offset = rng.gen_range(0..block_size as u32);
+                }
 
-        subsets
+                subset
+            })
+            .collect()
     }
 
     /// Generate hints from database bytes.
