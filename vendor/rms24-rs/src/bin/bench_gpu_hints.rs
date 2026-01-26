@@ -139,8 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut hint_meta = Vec::with_capacity(total_hints as usize);
                 for hint_idx in 0..total_hints {
-                    let select_values = prf.select_vector(hint_idx, params.num_blocks as u32);
-                    let cutoff = find_median_cutoff(&select_values);
+                    let mut select_values = prf.select_vector(hint_idx, params.num_blocks as u32);
+                    let cutoff = find_median_cutoff(&mut select_values);
 
                     let (extra_block, extra_offset) =
                         if cutoff > 0 && (hint_idx as u64) < params.num_reg_hints {

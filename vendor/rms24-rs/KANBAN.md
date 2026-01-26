@@ -14,10 +14,11 @@
 
 ## In Progress
 
-- [ ] Benchmark warp kernel on Modal H200 (2026-01-25)
+- [x] Benchmark Forge kernel on Modal H200 (2026-01-25)
   - Previous (old kernel): 98 hints/sec
-  - New: Precomputed subsets + warp parallelism implemented
-  - Run: `modal run scripts/modal_run_bench.py --gpu h200 --max-hints 1000`
+  - Forge kernel (256 threads): **985K hints/sec per GPU**
+  - Production run (λ=128): **10.97M hints** in **5.4 min** on 50× H200
+  - Combined throughput: **49.2M hints/sec**
 
 ## Next Up
 
@@ -45,6 +46,18 @@
 - [ ] Parallelize Phase 1 with rayon (currently single-threaded)
 - [ ] Cache select_vector results (reused across hints)
 
+**Subset generation optimizations:**
+- [x] Vectorized PyTorch generation (2026-01-25)
+  - Generate all indices at once instead of Python loop
+  - Reduced subset gen from 90s to 65s (28% faster)
+  - Wall clock: 5.4min → 4.6min, Cost: $19 → $16
+- [ ] Rust + rayon parallel generation (est. 5-10s)
+- [x] CUDA kernel for PRF-based subset gen (2026-01-25)
+  - `hint_gen_with_prf_kernel`: ChaCha12 PRF on GPU
+  - Eliminates 65s CPU subset gen + 37.6GB transfer per GPU
+  - Script: `scripts/modal_forge_gpu_subset.py`
+  - Kernel: `cuda/subset_gen_kernel.cu`
+
 **GPU kernel optimizations:**
 - [x] Precompute subset lists on CPU, pass to GPU
   - Implemented: `HintSubset` + `SubsetData` structs
@@ -52,6 +65,9 @@
 - [x] Warp-level parallelism (`rms24_hint_gen_warp_kernel`)
   - 32 threads per hint, strided block processing
   - Butterfly shuffle reduction (`__shfl_xor_sync`)
+- [x] Forge-optimized kernel (256 threads, 8 warps)
+  - Two-level XOR reduction (warp shuffle + shared memory)
+  - 985K hints/sec per GPU (370× faster than Plinko)
 - [ ] Vectorized loads (ulong2) for 16-byte aligned reads
 - [ ] Coalesced memory access patterns (sort blocks by stride)
 
@@ -119,7 +135,39 @@ modal run scripts/modal_run_bench.py --gpu h200 --db /data/mainnet-v3/database.b
 | 10x H200, shared Phase 1 | 1,000 | 5.17s | 193 hints/sec |
 | 10x H200, shared Phase 1 | 10,000 | 4.90s | 2,042 hints/sec |
 | 20x H200, shared Phase 1 | 20,000 | 4.34s | 4,610 hints/sec |
-| 50x H200, shared Phase 1 | 50,000 | 2.19s | **22,855 hints/sec** |
+| 50x H200, shared Phase 1 | 50,000 | 2.19s | **22,855 hints/sec**
+
+**Forge-optimized kernel (256 threads, 2026-01-25):**
+| Config | Hints | Kernel Time | Throughput |
+|--------|-------|-------------|------------|
+| H200, 10M entries, S=512 | 100 | 0.024 ms | 4.1M hints/sec |
+| H200, 10M entries, S=1024 | 1,000 | 0.053 ms | 18.9M hints/sec |
+| 50x H200, 10M entries, S=1024 | 100,000 | 0.094 ms avg | **1.06B hints/sec combined** |
+
+**Production run (λ=128, 2026-01-25):**
+| Config | Hints | Kernel Time | Throughput |
+|--------|-------|-------------|------------|
+| 50x H200, 73GB mainnet, S=21K | 10,966,016 | 222.7 ms avg | **49.2M hints/sec combined** |
+| Per-GPU (best) | 219,320 | 221.7 ms | 989K hints/sec |
+| Per-GPU (worst) | 219,320 | 231.4 ms | 948K hints/sec |
+| Wall clock time | - | - | **5.4 min** |
+
+**Production run with vectorized subset gen (λ=128, 2026-01-25):**
+| Config | Hints | Kernel Time | Throughput |
+|--------|-------|-------------|------------|
+| 50x H200, 73GB mainnet, S=21K | 10,966,016 | 222.4 ms avg | **49.3M hints/sec combined** |
+| Subset gen time | - | 65s avg (was 90s) | **28% faster** |
+| Wall clock time | - | - | **4.6 min (was 5.4 min)** |
+| Cost | - | - | **~$16 (was ~$19)** |
+
+**Production run with GPU PRF (λ=128, 2026-01-25):**
+| Config | Hints | Kernel Time | Throughput |
+|--------|-------|-------------|------------|
+| 50x H200, 73GB mainnet, GPU PRF | 10,966,016 | 411.2 ms avg | **26.7M hints/sec combined** |
+| Subset gen time | - | **0s** | **Eliminated!** |
+| Data transfer | - | **0 GB** | **37.6GB/GPU eliminated** |
+| Wall clock time | - | - | **4.5 min** |
+| Per-GPU throughput | 219,320 | 411ms | **533K hints/sec** |
 
 **Distributed (shared Phase 1):**
 - Phase 1 (CPU, 32 cores): 2.4s for 26K hints on 100MB DB
@@ -127,6 +175,22 @@ modal run scripts/modal_run_bench.py --gpu h200 --db /data/mainnet-v3/database.b
 - Individual GPU kernel: 0.3-0.5s per 1K hints (after cargo cache)
 
 **Bottlenecks remaining:**
-1. Phase 1 CPU still slow (66s for 1K hints on 5K blocks) - rayon helps but PRF is sequential
+1. ~~Phase 1 CPU still slow~~ - Vectorized generation now 65s (was 90s)
 2. GPU throughput scales with batch size (more hints = better occupancy)
-3. Memory transfer overhead for small batches
+3. Memory transfer overhead: 37.6 GB subset data per GPU
+
+**Cost breakdown (λ=128 production run):**
+| Phase | Time (CPU subset) | Time (GPU PRF) | Reusable? |
+|-------|-------------------|----------------|-----------|
+| DB load | 85s | 85s | Yes (keep GPU warm) |
+| Kernel compile | 42s | 42s | Yes (pre-compile) |
+| Subset generation | 65s | **0s** | No (per-client PRF key) |
+| Subset data transfer | ~10s | **0s** | No (37.6GB per GPU) |
+| Kernel execution | 0.22s | **0.41s** | No (per-client) |
+| **Total per client** | **75.2s** | **0.41s** | |
+| **Total cold start** | **192s** | **~128s** | |
+
+**Modal H200 pricing:**
+- GPU: $0.001261/sec, CPU: $0.0000131/core/sec (17 cores)
+- Cold start: ~$16 for 50 GPUs
+- Warm (persistent): ~$4.10 per client (subset gen + kernel only)

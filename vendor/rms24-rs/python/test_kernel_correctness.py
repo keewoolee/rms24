@@ -9,7 +9,18 @@ Verifies that:
 
 import torch
 import unittest
-from forge_hint_kernel import HintGenKernel
+import sys
+import os
+
+# Support testing different kernel implementations
+KERNEL_MODULE = os.environ.get("KERNEL_MODULE", "forge_minimal")
+
+if KERNEL_MODULE == "forge_optimized":
+    from forge_optimized import CUDAModel as HintGenKernel, PytorchModel
+elif KERNEL_MODULE == "forge_v2":
+    from forge_v2 import HintGenKernel
+else:
+    from forge_minimal import HintGenKernel
 
 
 class TestHintGenKernelCorrectness(unittest.TestCase):

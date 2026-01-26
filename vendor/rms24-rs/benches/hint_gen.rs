@@ -43,10 +43,10 @@ fn bench_prf_operations(c: &mut Criterion) {
 fn bench_median_cutoff(c: &mut Criterion) {
     use rms24::hints::find_median_cutoff;
 
-    let values: Vec<u32> = (0..1000).collect();
+    let mut values: Vec<u32> = (0..1000).collect();
 
     c.bench_function("find_median_cutoff_1000", |b| {
-        b.iter(|| find_median_cutoff(black_box(&values)));
+        b.iter(|| find_median_cutoff(black_box(&mut values)));
     });
 }
 

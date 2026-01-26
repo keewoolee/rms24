@@ -46,37 +46,52 @@ impl Client {
 
         (hint_start..hint_end)
             .into_par_iter()
-            .map(|hint_idx| {
-                let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
-                let cutoff = find_median_cutoff(&select_values);
+            .map_init(
+                || (
+                    Vec::with_capacity(num_blocks as usize), 
+                    Vec::with_capacity(num_blocks as usize),
+                    Vec::with_capacity(num_blocks as usize * 64),
+                    Vec::with_capacity(num_blocks as usize * 64)
+                ),
+                |(select_values, offset_values, select_bytes, offset_bytes), hint_idx| {
+                    self.prf.fill_select_and_offset_reused(
+                        hint_idx as u32, 
+                        num_blocks, 
+                        select_values, 
+                        offset_values,
+                        select_bytes,
+                        offset_bytes
+                    );
+                    let cutoff = find_median_cutoff(select_values);
 
-                let mut subset = HintSubset::new();
-                subset.is_regular = hint_idx < num_reg;
+                    let mut subset = HintSubset::new();
+                    subset.is_regular = hint_idx < num_reg;
 
-                if cutoff == 0 {
-                    return subset;
-                }
-
-                let mut high_blocks = Vec::new();
-                for block in 0..num_blocks {
-                    let offset = (self.prf.offset(hint_idx as u32, block) % block_size) as u32;
-                    if select_values[block as usize] < cutoff {
-                        subset.blocks.push(block);
-                        subset.offsets.push(offset);
-                    } else {
-                        high_blocks.push((block, offset));
+                    if cutoff == 0 {
+                        return subset;
                     }
-                }
 
-                if hint_idx < num_reg && !high_blocks.is_empty() {
-                    let mut rng = rand::thread_rng();
-                    let idx = rng.gen_range(0..high_blocks.len());
-                    subset.extra_block = high_blocks[idx].0;
-                    subset.extra_offset = rng.gen_range(0..block_size as u32);
-                }
+                    let mut high_blocks = Vec::new();
+                    for block in 0..num_blocks {
+                        let offset = (offset_values[block as usize] % block_size) as u32;
+                        if select_values[block as usize] < cutoff {
+                            subset.blocks.push(block);
+                            subset.offsets.push(offset);
+                        } else {
+                            high_blocks.push((block, offset));
+                        }
+                    }
 
-                subset
-            })
+                    if hint_idx < num_reg && !high_blocks.is_empty() {
+                        let mut rng = rand::thread_rng();
+                        let idx = rng.gen_range(0..high_blocks.len());
+                        subset.extra_block = high_blocks[idx].0;
+                        subset.extra_offset = rng.gen_range(0..block_size as u32);
+                    }
+
+                    subset
+                }
+            )
             .collect()
     }
 
@@ -96,8 +111,8 @@ impl Client {
         // Phase 1: Build skeleton (cutoffs and extras)
         let mut rng = rand::thread_rng();
         for hint_idx in 0..num_total {
-            let select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
-            self.hints.cutoffs[hint_idx] = find_median_cutoff(&select_values);
+            let mut select_values = self.prf.select_vector(hint_idx as u32, num_blocks);
+            self.hints.cutoffs[hint_idx] = find_median_cutoff(&mut select_values);
 
             if hint_idx < num_reg && self.hints.cutoffs[hint_idx] != 0 {
                 // Pick random block from high subset

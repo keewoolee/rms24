@@ -143,15 +143,23 @@ pub fn xor_bytes_inplace(a: &mut [u8], b: &[u8]) {
 ///
 /// Returns cutoff such that exactly len/2 elements are smaller,
 /// or 0 if the two middle values collide (~2^-32 probability).
-pub fn find_median_cutoff(values: &[u32]) -> u32 {
-    debug_assert!(values.len() % 2 == 0, "Length must be even");
-    let mut sorted: Vec<u32> = values.to_vec();
-    sorted.sort_unstable();
-    let mid = sorted.len() / 2;
-    if sorted[mid - 1] == sorted[mid] {
+/// Find median cutoff value in-place.
+pub fn find_median_cutoff(v: &mut [u32]) -> u32 {
+    debug_assert!(v.len() % 2 == 0, "Length must be even");
+    let mid = v.len() / 2;
+    
+    // Find the element that would be at the mid position in a sorted array
+    let (_, mid_val, _) = v.select_nth_unstable(mid);
+    let cutoff = *mid_val;
+    
+    // Find the element that would be at mid-1 position to check for collision
+    let (_, max_lower_val, _) = v[..mid].select_nth_unstable(mid - 1);
+    let max_lower = *max_lower_val;
+    
+    if max_lower == cutoff {
         return 0; // Collision at median
     }
-    sorted[mid]
+    cutoff
 }
 
 #[cfg(test)]
