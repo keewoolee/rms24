@@ -237,3 +237,83 @@ def test_make_slice_cli_rejects_too_small_database(tmp_path: Path):
 
     assert proc.returncode == 2
     assert "database.bin size" in proc.stderr
+
+
+def test_make_slice_cli_rejects_non_integer_entries(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 20 + (0).to_bytes(4, "little"))
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 20 + b"s" * 32 + (0).to_bytes(4, "little"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "abc",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "entries must be an integer" in proc.stderr
+
+
+def test_make_slice_cli_rejects_missing_mapping_file(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 20 + (0).to_bytes(4, "little"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "storage-mapping.bin" in proc.stderr
+
+
+def test_make_slice_cli_rejects_unaligned_account_mapping(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 23)
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 56)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "account-mapping.bin size" in proc.stderr

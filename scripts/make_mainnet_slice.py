@@ -10,6 +10,7 @@ if __package__ is None:
 from scripts import data_slice
 
 ENTRY_SIZE = 40
+COPY_CHUNK_SIZE = 1024 * 1024
 
 
 def positive_int(value: str) -> int:
@@ -22,9 +23,30 @@ def positive_int(value: str) -> int:
     return entries
 
 
+def require_file(parser: argparse.ArgumentParser, path: Path) -> None:
+    if not path.is_file():
+        parser.error(f"missing required file: {path.name}")
+
+
+def require_aligned(
+    parser: argparse.ArgumentParser, path: Path, record_size: int
+) -> None:
+    size = path.stat().st_size
+    if size % record_size != 0:
+        parser.error(
+            f"{path.name} size {size} is not aligned to record size {record_size}"
+        )
+
+
 def copy_db_slice(source_db: Path, out_db: Path, entries: int) -> None:
     with source_db.open("rb") as src, out_db.open("wb") as dst:
-        dst.write(src.read(entries * ENTRY_SIZE))
+        remaining = entries * ENTRY_SIZE
+        while remaining > 0:
+            chunk = src.read(min(COPY_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            dst.write(chunk)
+            remaining -= len(chunk)
 
 
 def main() -> None:
@@ -39,6 +61,12 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     source_db = source / "database.bin"
+    account_mapping = source / "account-mapping.bin"
+    storage_mapping = source / "storage-mapping.bin"
+    require_file(parser, source_db)
+    require_file(parser, account_mapping)
+    require_file(parser, storage_mapping)
+
     required_bytes = args.entries * ENTRY_SIZE
     db_size = source_db.stat().st_size
     if db_size < required_bytes:
@@ -48,16 +76,25 @@ def main() -> None:
 
     copy_db_slice(source_db, out / "database.bin", args.entries)
 
-    data_slice.filter_account_mapping_file(
-        source / "account-mapping.bin",
-        max_index=args.entries,
-        out_path=out / "account-mapping.bin",
-    )
-    data_slice.filter_storage_mapping_file(
-        source / "storage-mapping.bin",
-        max_index=args.entries,
-        out_path=out / "storage-mapping.bin",
-    )
+    require_aligned(parser, account_mapping, data_slice.ACCOUNT_RECORD_SIZE)
+    require_aligned(parser, storage_mapping, data_slice.STORAGE_RECORD_SIZE)
+
+    try:
+        data_slice.filter_account_mapping_file(
+            account_mapping,
+            max_index=args.entries,
+            out_path=out / "account-mapping.bin",
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        data_slice.filter_storage_mapping_file(
+            storage_mapping,
+            max_index=args.entries,
+            out_path=out / "storage-mapping.bin",
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     data_slice.write_metadata(
         meta_path=out / "metadata.json",
