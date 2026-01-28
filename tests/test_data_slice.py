@@ -145,6 +145,8 @@ def test_write_metadata(tmp_path: Path):
 
 
 def test_make_slice_cli(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
     source_dir = tmp_path / "source"
     source_dir.mkdir()
 
@@ -164,7 +166,7 @@ def test_make_slice_cli(tmp_path: Path):
 
     cmd = [
         sys.executable,
-        "scripts/make_mainnet_slice.py",
+        str(script_path),
         "--source",
         str(source_dir),
         "--out",
@@ -177,4 +179,61 @@ def test_make_slice_cli(tmp_path: Path):
     assert (out_dir / "database.bin").stat().st_size == 2 * 40
     assert (out_dir / "account-mapping.bin").stat().st_size == 24  # idx 0 only
     assert (out_dir / "storage-mapping.bin").stat().st_size == 56  # idx 1 only
-    assert (out_dir / "metadata.json").exists()
+    meta = json.loads((out_dir / "metadata.json").read_text())
+    assert meta["entries"] == 2
+    assert meta["entry_size"] == 40
+    assert meta["files"]["database.bin"]["bytes"] == 2 * 40
+
+
+def test_make_slice_cli_rejects_non_positive_entries(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 20 + (0).to_bytes(4, "little"))
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 20 + b"s" * 32 + (0).to_bytes(4, "little"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "0",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "entries must be positive" in proc.stderr
+
+
+def test_make_slice_cli_rejects_too_small_database(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 20 + (0).to_bytes(4, "little"))
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 20 + b"s" * 32 + (0).to_bytes(4, "little"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "2",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "database.bin size" in proc.stderr

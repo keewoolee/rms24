@@ -12,6 +12,16 @@ from scripts import data_slice
 ENTRY_SIZE = 40
 
 
+def positive_int(value: str) -> int:
+    try:
+        entries = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("entries must be an integer") from exc
+    if entries <= 0:
+        raise argparse.ArgumentTypeError("entries must be positive")
+    return entries
+
+
 def copy_db_slice(source_db: Path, out_db: Path, entries: int) -> None:
     with source_db.open("rb") as src, out_db.open("wb") as dst:
         dst.write(src.read(entries * ENTRY_SIZE))
@@ -21,14 +31,22 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, help="Source directory with database.bin and mappings")
     parser.add_argument("--out", required=True, help="Output directory")
-    parser.add_argument("--entries", type=int, default=1_000_000)
+    parser.add_argument("--entries", type=positive_int, default=1_000_000)
     args = parser.parse_args()
 
     source = Path(args.source)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    copy_db_slice(source / "database.bin", out / "database.bin", args.entries)
+    source_db = source / "database.bin"
+    required_bytes = args.entries * ENTRY_SIZE
+    db_size = source_db.stat().st_size
+    if db_size < required_bytes:
+        parser.error(
+            f"database.bin size {db_size} is smaller than required {required_bytes}"
+        )
+
+    copy_db_slice(source_db, out / "database.bin", args.entries)
 
     data_slice.filter_account_mapping_file(
         source / "account-mapping.bin",
