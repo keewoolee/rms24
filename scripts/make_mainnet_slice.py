@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 if __package__ is None:
@@ -39,14 +40,29 @@ def require_aligned(
 
 
 def copy_db_slice(source_db: Path, out_db: Path, entries: int) -> None:
-    with source_db.open("rb") as src, out_db.open("wb") as dst:
-        remaining = entries * ENTRY_SIZE
-        while remaining > 0:
-            chunk = src.read(min(COPY_CHUNK_SIZE, remaining))
-            if not chunk:
-                break
-            dst.write(chunk)
-            remaining -= len(chunk)
+    remaining = entries * ENTRY_SIZE
+    tmp_path = None
+    try:
+        with source_db.open("rb") as src, tempfile.NamedTemporaryFile(
+            "wb", delete=False, dir=out_db.parent
+        ) as dst:
+            tmp_path = Path(dst.name)
+            while remaining > 0:
+                chunk = src.read(min(COPY_CHUNK_SIZE, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+        if remaining != 0:
+            raise ValueError("database.bin truncated while copying slice")
+        tmp_path.replace(out_db)
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def main() -> None:
@@ -74,7 +90,10 @@ def main() -> None:
             f"database.bin size {db_size} is smaller than required {required_bytes}"
         )
 
-    copy_db_slice(source_db, out / "database.bin", args.entries)
+    try:
+        copy_db_slice(source_db, out / "database.bin", args.entries)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     require_aligned(parser, account_mapping, data_slice.ACCOUNT_RECORD_SIZE)
     require_aligned(parser, storage_mapping, data_slice.STORAGE_RECORD_SIZE)

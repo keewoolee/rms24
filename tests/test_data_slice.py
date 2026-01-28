@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts import data_slice
+from scripts.make_mainnet_slice import ENTRY_SIZE, copy_db_slice
 
 
 def test_filter_account_mapping_by_index(tmp_path: Path):
@@ -142,6 +143,17 @@ def test_write_metadata(tmp_path: Path):
     assert "database.bin" in payload["files"]
     assert payload["files"]["database.bin"]["bytes"] == 40
     assert payload["files"]["database.bin"]["sha256"] == hashlib.sha256(payload_bytes).hexdigest()
+
+
+def test_copy_db_slice_requires_full_bytes(tmp_path: Path):
+    source_db = tmp_path / "database.bin"
+    source_db.write_bytes(b"a" * ENTRY_SIZE)
+    out_db = tmp_path / "out.bin"
+
+    with pytest.raises(ValueError):
+        copy_db_slice(source_db, out_db, entries=2)
+
+    assert not out_db.exists()
 
 
 def test_make_slice_cli(tmp_path: Path):
@@ -292,6 +304,32 @@ def test_make_slice_cli_rejects_missing_mapping_file(tmp_path: Path):
     assert "storage-mapping.bin" in proc.stderr
 
 
+def test_make_slice_cli_rejects_missing_database(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 20 + (0).to_bytes(4, "little"))
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 20 + b"s" * 32 + (0).to_bytes(4, "little"))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "database.bin" in proc.stderr
+
+
 def test_make_slice_cli_rejects_unaligned_account_mapping(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[1]
     script_path = repo_root / "scripts" / "make_mainnet_slice.py"
@@ -317,3 +355,30 @@ def test_make_slice_cli_rejects_unaligned_account_mapping(tmp_path: Path):
 
     assert proc.returncode == 2
     assert "account-mapping.bin size" in proc.stderr
+
+
+def test_make_slice_cli_rejects_unaligned_storage_mapping(tmp_path: Path):
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "make_mainnet_slice.py"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "database.bin").write_bytes(b"a" * 40)
+    (source_dir / "account-mapping.bin").write_bytes(b"x" * 24)
+    (source_dir / "storage-mapping.bin").write_bytes(b"z" * 55)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--source",
+        str(source_dir),
+        "--out",
+        str(out_dir),
+        "--entries",
+        "1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+
+    assert proc.returncode == 2
+    assert "storage-mapping.bin size" in proc.stderr
