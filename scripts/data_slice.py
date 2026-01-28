@@ -9,27 +9,25 @@ STORAGE_RECORD_SIZE = 56
 
 
 def filter_account_mapping_bytes(data: bytes, max_index: int, out_path: Path) -> None:
-    out = bytearray()
-    for i in range(0, len(data), ACCOUNT_RECORD_SIZE):
-        record = data[i : i + ACCOUNT_RECORD_SIZE]
-        if len(record) != ACCOUNT_RECORD_SIZE:
-            break
-        idx = int.from_bytes(record[20:24], "little")
-        if idx < max_index:
-            out += record
-    out_path.write_bytes(out)
+    if len(data) % ACCOUNT_RECORD_SIZE != 0:
+        raise ValueError("account mapping data length is not aligned to record size")
+    with out_path.open("wb") as out:
+        for i in range(0, len(data), ACCOUNT_RECORD_SIZE):
+            record = data[i : i + ACCOUNT_RECORD_SIZE]
+            idx = int.from_bytes(record[20:24], "little")
+            if idx < max_index:
+                out.write(record)
 
 
 def filter_storage_mapping_bytes(data: bytes, max_index: int, out_path: Path) -> None:
-    out = bytearray()
-    for i in range(0, len(data), STORAGE_RECORD_SIZE):
-        record = data[i : i + STORAGE_RECORD_SIZE]
-        if len(record) != STORAGE_RECORD_SIZE:
-            break
-        idx = int.from_bytes(record[52:56], "little")
-        if idx < max_index:
-            out += record
-    out_path.write_bytes(out)
+    if len(data) % STORAGE_RECORD_SIZE != 0:
+        raise ValueError("storage mapping data length is not aligned to record size")
+    with out_path.open("wb") as out:
+        for i in range(0, len(data), STORAGE_RECORD_SIZE):
+            record = data[i : i + STORAGE_RECORD_SIZE]
+            idx = int.from_bytes(record[52:56], "little")
+            if idx < max_index:
+                out.write(record)
 
 
 def sha256_file(path: Path) -> str:
