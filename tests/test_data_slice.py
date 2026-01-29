@@ -463,3 +463,12 @@ def test_download_helper_validates_checksum(tmp_path: Path):
     from scripts import download_slice
 
     download_slice.verify_files(out_dir, meta)
+
+
+def test_build_r2_keys():
+    from scripts import upload_slice_r2
+
+    files = ["database.bin", "metadata.json"]
+    keys = upload_slice_r2.build_object_keys(prefix="mainnet-v3-slice-1m", files=files)
+
+    assert keys["database.bin"].endswith("mainnet-v3-slice-1m/database.bin")
