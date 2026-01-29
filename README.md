@@ -44,6 +44,25 @@ python3 demo.py --kpir
 
 ## Usage
 
+### Real Data Slice (1M entries)
+
+We provide a 1,000,000-entry mainnet-v3 slice with a 30% account / 70% storage mix.
+The slice is reindexed and shuffled for test coverage.
+
+Download and verify:
+
+```bash
+python3 scripts/download_slice.py --out tests/data/mainnet-v3-slice-1m-mixed
+```
+
+Run slice-gated tests:
+
+```bash
+RMS24_DATA_DIR=tests/data/mainnet-v3-slice-1m-mixed python3 -m pytest tests/test_data_slice.py -v
+```
+
+Public base URL: `https://pir.53627.org/mainnet-v3-slice-1m-mixed/`
+
 ### Index PIR
 
 ```python

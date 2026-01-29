@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from urllib.request import urlretrieve
 
-BASE_URL = "https://pir.53627.org/mainnet-v3-slice-1m"
+BASE_URL = "https://pir.53627.org/mainnet-v3-slice-1m-mixed"
 
 
 def sha256_file(path: Path) -> str:

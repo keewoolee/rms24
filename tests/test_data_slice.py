@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -465,6 +466,12 @@ def test_download_helper_validates_checksum(tmp_path: Path):
     download_slice.verify_files(out_dir, meta)
 
 
+def test_download_helper_base_url_points_to_mixed_slice():
+    from scripts import download_slice
+
+    assert download_slice.BASE_URL.endswith("/mainnet-v3-slice-1m-mixed")
+
+
 def test_build_r2_keys():
     from scripts import upload_slice_r2
 
@@ -472,3 +479,13 @@ def test_build_r2_keys():
     keys = upload_slice_r2.build_object_keys(prefix="mainnet-v3-slice-1m", files=files)
 
     assert keys["database.bin"].endswith("mainnet-v3-slice-1m/database.bin")
+
+
+def test_real_slice_guarded():
+    data_dir = os.environ.get("RMS24_DATA_DIR")
+    if not data_dir:
+        return
+    base = Path(data_dir)
+    db = base / "database.bin"
+    assert db.exists()
+    assert db.stat().st_size % 40 == 0
